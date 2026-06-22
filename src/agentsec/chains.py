@@ -7,6 +7,7 @@ from .models import RuleHit, SampleFeatures
 
 def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeatures) -> list[dict[str, Any]]:
     signals = features.signals or {}
+    strong_chain_rules = set(signals.get("strong_chain_rules") or [])
     hit_by_category: dict[str, list[str]] = {}
     for hit in hits:
         hit_by_category.setdefault(hit.category, []).append(hit.rule_id)
@@ -38,7 +39,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
-    if signals.get("trace_cleanup") and (signals.get("sensitive_access") or signals.get("credential_access")):
+    if "R102" in strong_chain_rules:
         chains.append(
             {
                 "chain_id": f"{md5}:trace-cleanup",
@@ -49,7 +50,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
-    if signals.get("privilege") and signals.get("sensitive_access"):
+    if "R103" in strong_chain_rules:
         chains.append(
             {
                 "chain_id": f"{md5}:privilege-followup",
@@ -71,9 +72,18 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
-    if signals.get("shell_or_cmd") and signals.get("sensitive_access") and (
-        signals.get("network_transfer") or signals.get("network_post")
-    ):
+    if "R109" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:credential-shell",
+                "title": "Credential access through shell or command execution",
+                "risk": "high",
+                "steps": ["credential_access", "shell_or_cmd"],
+                "supporting_rules": sorted(set(hit_by_category.get("credential", []) + hit_by_category.get("agent", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R108" in strong_chain_rules:
         chains.append(
             {
                 "chain_id": f"{md5}:shell-sensitive-network",
@@ -81,6 +91,17 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
                 "risk": "high",
                 "steps": ["shell_or_cmd", "sensitive_access", "network_transfer"],
                 "supporting_rules": sorted(set(hit_by_category.get("agent", []) + hit_by_category.get("file", []) + hit_by_category.get("network", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R110" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:privilege-shell-network-context",
+                "title": "Privilege command with shell and network context",
+                "risk": "high",
+                "steps": ["privilege_or_permission_change", "shell_or_cmd", "network_context"],
+                "supporting_rules": sorted(set(hit_by_category.get("privilege", []) + hit_by_category.get("agent", []) + hit_by_category.get("network", []) + hit_by_category.get("combo", []))),
             }
         )
 

@@ -28,6 +28,7 @@ class RuleEngine:
         agent_tool_events = self._matching_events(events, self._is_agent_tool_abuse)
         network_post = self._is_network_post_exfil(pcap_features)
         suspicious_network = self._is_suspicious_network(pcap_features, network_post)
+        network_observed = self._is_network_observed(pcap_features)
         shell_events = self._matching_events(events, self._is_shell_or_cmd_event)
         copy_events = self._matching_events(events, self._is_copy_action)
 
@@ -87,7 +88,7 @@ class RuleEngine:
                     pcap_features,
                 )
             )
-        if cleanup_events and (sensitive_events or credential_events):
+        if cleanup_events and (credential_events or (sensitive_events and (network_events or network_post or privilege_events))):
             hits.append(
                 self._combo_hit(
                     "R102",
@@ -96,6 +97,17 @@ class RuleEngine:
                     "chain",
                     "combo_cleanup_plus_sensitive",
                     [cleanup_events[0], (credential_events or sensitive_events)[0]],
+                )
+            )
+        if credential_events and shell_events:
+            hits.append(
+                self._combo_hit(
+                    "R109",
+                    "Credential access through shell or command execution",
+                    "combo",
+                    "chain",
+                    "combo_credential_shell",
+                    [credential_events[0], shell_events[0]],
                 )
             )
         if privilege_events and sensitive_events:
@@ -107,6 +119,18 @@ class RuleEngine:
                     "chain",
                     "combo_privilege_followup",
                     [privilege_events[0], sensitive_events[0]],
+                )
+            )
+        if privilege_events and shell_events and network_observed:
+            hits.append(
+                self._combo_hit(
+                    "R110",
+                    "Privilege command with shell and network context",
+                    "combo",
+                    "chain",
+                    "combo_privilege_shell_network_context",
+                    [privilege_events[0], shell_events[0]],
+                    pcap_features,
                 )
             )
         if credential_events and (copy_events or compression_events or network_events or network_post):
@@ -154,7 +178,7 @@ class RuleEngine:
                     "sensitive": bool(sensitive_events),
                     "credential": bool(credential_events),
                     "archive": bool(compression_events),
-                    "network": bool(network_events or network_post),
+                    "network": bool(network_events or network_post or network_observed),
                     "privilege": bool(privilege_events),
                     "cleanup": bool(cleanup_events),
                     "destructive": bool(destructive_events),
@@ -170,6 +194,7 @@ class RuleEngine:
             "compression": bool(compression_events),
             "network_transfer": bool(network_events),
             "network_post": bool(network_post),
+            "network_observed": bool(network_observed),
             "destructive": bool(destructive_events),
             "privilege": bool(privilege_events),
             "trace_cleanup": bool(cleanup_events),
@@ -389,6 +414,14 @@ class RuleEngine:
                 suspicious_domain = True
                 break
         return network_post or bool(ports & suspicious_ports) or suspicious_domain
+
+    def _is_network_observed(self, features: dict[str, Any]) -> bool:
+        if not features:
+            return False
+        return bool(
+            int(features.get("external_ip_count") or 0) > 0
+            or int(features.get("http_post_count") or 0) > 0
+        )
 
     def _add_if(
         self,

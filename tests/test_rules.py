@@ -69,3 +69,74 @@ def test_upload_post_can_create_sensitive_network_chain() -> None:
     assert label == 1
     assert score >= SCORING["score_threshold"]
 
+
+def test_cleanup_sensitive_archive_without_transfer_stays_benign() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="tar" a1="xf" a2="package.tgz"',
+            fields={"a0": "tar", "a1": "xf", "a2": "package.tgz"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/home/demo/.ssh"',
+            fields={"name": "/home/demo/.ssh"},
+        ),
+        Event(
+            md5="synthetic",
+            source="session",
+            event_type="tool_call",
+            text='{"tool":"gateway.sessions.remove","action":"sessions.remove"}',
+            fields={"tool": "gateway.sessions.remove", "action": "sessions.remove"},
+        ),
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R102" not in {hit.rule_id for hit in hits}
+    assert signals["trace_cleanup"] is True
+    assert label == 0
+    assert score < SCORING["score_threshold"]
+
+
+def test_credential_access_through_shell_is_strong_chain() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="bash" a1="-lc" a2="cat /home/demo/.ssh/id_rsa"',
+            fields={"a0": "bash", "a1": "-lc", "a2": "cat /home/demo/.ssh/id_rsa"},
+        )
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R109" in {hit.rule_id for hit in hits}
+    assert signals["strong_chain"] is True
+    assert label == 1
+    assert score >= SCORING["score_threshold"]
+
+
+def test_privilege_shell_with_network_context_is_strong_chain() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="sudo" a1="bash"',
+            fields={"a0": "sudo", "a1": "bash", "comm": "sudo"},
+        )
+    ]
+    pcap = {"http_post_count": 1, "external_ip_count": 1, "tcp_flow_count": 2, "dst_ports": [443]}
+    hits, signals = engine.evaluate(events, pcap)
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R110" in {hit.rule_id for hit in hits}
+    assert signals["network_observed"] is True
+    assert label == 1
+    assert score >= SCORING["score_threshold"]

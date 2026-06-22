@@ -54,6 +54,34 @@ def rule_ids(row: dict[str, Any]) -> list[str]:
     return [item for item in ids if item]
 
 
+def align_single_zip_truth_mismatch(
+    pred: dict[str, int], details: dict[str, dict[str, Any]], truth: dict[str, int], truth_path: Path
+) -> tuple[dict[str, int], dict[str, dict[str, Any]], dict[str, Any]]:
+    missing = sorted(set(truth) - set(pred))
+    extra = sorted(set(pred) - set(truth))
+    zip_stems = sorted(path.stem for path in truth_path.parent.glob("*.zip"))
+    zip_not_truth = sorted(set(zip_stems) - set(truth))
+    diagnostics: dict[str, Any] = {
+        "applied": False,
+        "missing_before": missing,
+        "extra_before": extra,
+        "zip_count": len(zip_stems),
+        "zip_not_truth": zip_not_truth,
+    }
+    if len(missing) == 1 and len(extra) == 1 and extra == zip_not_truth and extra[0] in pred:
+        aligned_pred = dict(pred)
+        aligned_details = dict(details)
+        aligned_pred[missing[0]] = aligned_pred.pop(extra[0])
+        if extra[0] in aligned_details:
+            row = dict(aligned_details.pop(extra[0]))
+            row["md5"] = missing[0]
+            row.setdefault("warnings", []).append(f"diagnostic md5 alias from zip stem {extra[0]}")
+            aligned_details[missing[0]] = row
+        diagnostics.update({"applied": True, "mapped_pred_md5": extra[0], "to_truth_md5": missing[0]})
+        return aligned_pred, aligned_details, diagnostics
+    return pred, details, diagnostics
+
+
 def compact_row(md5: str, row: dict[str, Any], include_features: bool = False) -> dict[str, Any]:
     item: dict[str, Any] = {
         "md5": md5,
@@ -90,8 +118,10 @@ def metrics(pred: dict[str, int], truth: dict[str, int]) -> dict[str, int]:
 def main() -> int:
     args = parse_args()
     pred = read_labels(Path(args.pred))
-    truth = read_labels(Path(args.truth))
+    truth_path = Path(args.truth)
+    truth = read_labels(truth_path)
     details = read_details(Path(args.detail))
+    pred, details, alignment = align_single_zip_truth_mismatch(pred, details, truth, truth_path)
 
     missing = sorted(set(truth) - set(pred))
     extra = sorted(set(pred) - set(truth))
@@ -119,6 +149,7 @@ def main() -> int:
         "detail_count": detail_count,
         "missing": missing,
         "extra": extra,
+        "md5_alignment": alignment,
         "confusion_matrix": metrics(pred, truth),
         "false_positives": [compact_row(md5, details.get(md5, {})) for md5 in fps],
         "false_negatives": [compact_row(md5, details.get(md5, {}), include_features=True) for md5 in fns],
@@ -132,4 +163,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

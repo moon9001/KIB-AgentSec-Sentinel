@@ -66,6 +66,8 @@ DEFAULT_RULES: dict[str, Any] = {
         "combo_privilege_followup": 55,
         "combo_credential_exfil": 75,
         "combo_shell_sensitive_network": 60,
+        "combo_credential_shell": 60,
+        "combo_privilege_shell_network_context": 55,
         "correlated_agent_audit_network": 55,
     },
     "keywords": {

@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from scripts.evaluate_example import align_single_zip_truth_mismatch
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -55,3 +57,16 @@ def test_pipeline_on_synthetic_samples(tmp_path: Path) -> None:
         cwd=ROOT,
         check=True,
     )
+
+
+def test_evaluation_aligns_single_zip_truth_mismatch(tmp_path: Path) -> None:
+    truth_dir = tmp_path / "example-s7"
+    truth_dir.mkdir()
+    (truth_dir / "zip-extra.zip").write_bytes(b"")
+    pred = {"zip-extra": 1, "same": 0}
+    truth = {"truth-missing": 1, "same": 0}
+    aligned, diagnostics = align_single_zip_truth_mismatch(pred, truth, truth_dir / "results.csv")
+    assert diagnostics["applied"] is True
+    assert "zip-extra" not in aligned
+    assert aligned["truth-missing"] == 1
+    assert aligned["same"] == 0

@@ -43,6 +43,30 @@ def read_scores(path: Path) -> dict[str, dict[str, Any]]:
         return scores
 
 
+def align_single_zip_truth_mismatch(
+    details: dict[str, dict[str, Any]], truth: dict[str, int], truth_path: Path
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    missing = sorted(set(truth) - set(details))
+    extra = sorted(set(details) - set(truth))
+    zip_stems = sorted(path.stem for path in truth_path.parent.glob("*.zip"))
+    zip_not_truth = sorted(set(zip_stems) - set(truth))
+    diagnostics: dict[str, Any] = {
+        "applied": False,
+        "missing_before": missing,
+        "extra_before": extra,
+        "zip_count": len(zip_stems),
+        "zip_not_truth": zip_not_truth,
+    }
+    if len(missing) == 1 and len(extra) == 1 and extra == zip_not_truth and extra[0] in details:
+        aligned = dict(details)
+        row = dict(aligned.pop(extra[0]))
+        row["md5"] = missing[0]
+        aligned[missing[0]] = row
+        diagnostics.update({"applied": True, "mapped_detail_md5": extra[0], "to_truth_md5": missing[0]})
+        return aligned, diagnostics
+    return details, diagnostics
+
+
 def compute_metrics(pred: dict[str, int], truth: dict[str, int]) -> dict[str, Any]:
     common = sorted(set(pred) & set(truth))
     tp = sum(1 for md5 in common if pred[md5] == 1 and truth[md5] == 1)
@@ -67,16 +91,17 @@ def compute_metrics(pred: dict[str, int], truth: dict[str, int]) -> dict[str, An
 
 def main() -> int:
     args = parse_args()
-    truth = read_truth(Path(args.truth))
+    truth_path = Path(args.truth)
+    truth = read_truth(truth_path)
     details = read_scores(Path(args.detail))
+    details, alignment = align_single_zip_truth_mismatch(details, truth, truth_path)
     rows = []
     for threshold in range(args.start, args.stop + 1, args.step):
         pred = {md5: 1 if float(row.get("score") or 0) >= threshold else 0 for md5, row in details.items()}
         rows.append({"threshold": threshold, **compute_metrics(pred, truth)})
-    print(json.dumps(rows, ensure_ascii=False, indent=2))
+    print(json.dumps({"md5_alignment": alignment, "sweep": rows}, ensure_ascii=False, indent=2))
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

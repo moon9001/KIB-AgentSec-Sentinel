@@ -78,6 +78,8 @@ python3 scripts/threshold_sweep.py --detail output/detail_rule.jsonl --truth dat
 
 `analyze_predictions.py` reports prediction coverage, TP/TN/FP/FN counts, FP/FN detail summaries, FP rule ranking, and rules that hit every detail row. `threshold_sweep.py` reports accuracy, precision, recall, f1, TP, TN, FP, and FN across score thresholds.
 
+The diagnostic scripts also print `md5_alignment`. If a labeled example set has exactly one truth md5 that does not match exactly one input zip stem, evaluation aliases that pair for metrics only. The submitted `result.csv` is still written with input zip stems.
+
 ## Optional LLM Attribution
 
 The detector is rule-first. LLM attribution is optional and only used for medium or higher rule scores.
