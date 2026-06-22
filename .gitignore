@@ -1,0 +1,43 @@
+# Runtime and official/test data
+data/
+models/
+logs/
+output/
+envs/
+cache/
+work/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Secrets and environment
+.env
+.env.*
+!.env.example
+*.s3cfg
+*.key
+*.pem
+
+# Sample artifacts and outputs
+*.zip
+*.pcap
+*.log
+*.tar.gz
+*.csv
+*.jsonl
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+

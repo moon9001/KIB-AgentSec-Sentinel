@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+from pathlib import Path
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Evaluate result.csv against a labeled results.csv if labels are available.")
+    parser.add_argument("--pred", required=True, help="Predicted result.csv with md5,label columns.")
+    parser.add_argument("--truth", required=True, help="Truth results.csv with md5,label columns.")
+    return parser.parse_args()
+
+
+def read_labels(path: Path) -> dict[str, int] | None:
+    if not path.exists():
+        print(json.dumps({"status": "skipped", "reason": f"truth file not found: {path}"}, ensure_ascii=False, indent=2))
+        return None
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        if not reader.fieldnames or "md5" not in reader.fieldnames or "label" not in reader.fieldnames:
+            print(json.dumps({"status": "skipped", "reason": "truth file has no md5,label columns"}, ensure_ascii=False, indent=2))
+            return None
+        labels: dict[str, int] = {}
+        for row in reader:
+            md5 = (row.get("md5") or "").strip()
+            label = (row.get("label") or "").strip()
+            if not md5 or label not in {"0", "1"}:
+                continue
+            labels[md5] = int(label)
+    return labels
+
+
+def main() -> int:
+    args = parse_args()
+    pred = read_labels(Path(args.pred))
+    truth = read_labels(Path(args.truth))
+    if pred is None or truth is None:
+        return 0
+    common = sorted(set(pred) & set(truth))
+    if not common:
+        print(json.dumps({"status": "skipped", "reason": "no overlapping md5 values"}, ensure_ascii=False, indent=2))
+        return 0
+
+    tp = sum(1 for md5 in common if pred[md5] == 1 and truth[md5] == 1)
+    tn = sum(1 for md5 in common if pred[md5] == 0 and truth[md5] == 0)
+    fp = sum(1 for md5 in common if pred[md5] == 1 and truth[md5] == 0)
+    fn = sum(1 for md5 in common if pred[md5] == 0 and truth[md5] == 1)
+    total = len(common)
+    precision = tp / (tp + fp) if tp + fp else 0.0
+    recall = tp / (tp + fn) if tp + fn else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if precision + recall else 0.0
+    metrics = {
+        "status": "ok",
+        "sample_count": total,
+        "accuracy": (tp + tn) / total if total else 0.0,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
+        "confusion_matrix": {"tp": tp, "tn": tn, "fp": fp, "fn": fn},
+        "missing_predictions": sorted(set(truth) - set(pred))[:20],
+    }
+    print(json.dumps(metrics, ensure_ascii=False, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
