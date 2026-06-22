@@ -22,11 +22,13 @@ def create_synthetic_dataset(output_dir: Path, force: bool = False) -> None:
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_sample_zip(output_dir / "normal001.zip", normal_session(), normal_audit(), b"")
+    _write_sample_zip(output_dir / "weak001.zip", weak_benign_session(), weak_benign_audit(), b"")
     _write_sample_zip(output_dir / "mal001.zip", malicious_session(), malicious_audit(), b"")
     with (output_dir / "results.csv").open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(["md5", "label"])
         writer.writerow(["normal001", 0])
+        writer.writerow(["weak001", 0])
         writer.writerow(["mal001", 1])
 
 
@@ -58,6 +60,34 @@ def normal_audit() -> str:
             'type=SYSCALL msg=audit(1710000000.1:10): arch=c000003e syscall=59 success=yes exe="/usr/bin/ls" comm="ls"',
             'type=EXECVE msg=audit(1710000000.1:10): argc=2 a0="ls" a1="/tmp"',
             'type=CWD msg=audit(1710000000.1:10): cwd="/workspace"',
+            "",
+        ]
+    )
+
+
+def weak_benign_session() -> list[dict]:
+    return [
+        {
+            "type": "tool_call",
+            "tool": "cmd_run",
+            "cwd": "/openclaw/workspace",
+            "cmd": "echo synthetic benign workspace check",
+        },
+        {
+            "type": "tool_call",
+            "tool": "gateway.sessions.remove",
+            "action": "sessions.remove",
+            "id": "synthetic-benign-session",
+        },
+        {"type": "message", "role": "assistant", "content": "No sensitive file, privilege, archive, or network transfer was requested."},
+    ]
+
+
+def weak_benign_audit() -> str:
+    return "\n".join(
+        [
+            'type=EXECVE msg=audit(1710000050.1:15): argc=3 a0="echo" a1="synthetic" a2="benign" exe="/usr/bin/echo" comm="echo"',
+            'type=CWD msg=audit(1710000050.1:15): cwd="/openclaw/workspace"',
             "",
         ]
     )
@@ -111,4 +141,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

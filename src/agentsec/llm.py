@@ -34,8 +34,20 @@ class LLMAnalyzer:
         self.allow_external_api = bool(llm_config.get("allow_external_api", False)) or allow_external_env
 
     def should_call(self, result: DetectionResult) -> bool:
-        min_score = float(self.config.get("min_score", 35))
-        return result.score >= min_score
+        return self.skip_reason(result) is None
+
+    def skip_reason(self, result: DetectionResult) -> str | None:
+        signals = (result.feature_summary or {}).get("signals", {})
+        if signals.get("terminal_rule"):
+            return "terminal rule; LLM cannot lower high-confidence detection"
+        if signals.get("strong_chain") and result.risk_level in {"high", "critical"}:
+            return "strong high-confidence behavior chain"
+        min_score = float(self.config.get("llm_min_score", self.config.get("min_score", 35)))
+        threshold = float(self.config.get("score_threshold", 60))
+        window = float(self.config.get("borderline_window", 12))
+        if result.risk_level == "medium" or (result.score >= min_score and abs(result.score - threshold) <= window):
+            return None
+        return "not medium or borderline score"
 
     def analyze(self, result: DetectionResult) -> dict[str, Any]:
         if not self._is_allowed_endpoint():

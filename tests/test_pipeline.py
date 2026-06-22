@@ -41,7 +41,7 @@ def test_pipeline_on_synthetic_samples(tmp_path: Path) -> None:
 
     with (output_dir / "result.csv").open("r", encoding="utf-8", newline="") as handle:
         rows = {row["md5"]: int(row["label"]) for row in csv.DictReader(handle)}
-    assert rows == {"mal001": 1, "normal001": 0}
+    assert rows == {"mal001": 1, "normal001": 0, "weak001": 0}
 
     subprocess.run(
         [
@@ -55,4 +55,3 @@ def test_pipeline_on_synthetic_samples(tmp_path: Path) -> None:
         cwd=ROOT,
         check=True,
     )
-

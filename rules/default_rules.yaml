@@ -1,18 +1,21 @@
 weights:
-  sensitive_file_access: 12
-  credential_access: 20
-  compression_archive: 12
-  network_exfil: 18
-  destructive_command: 60
-  privilege_escalation: 20
-  trace_cleanup: 28
-  agent_tool_abuse: 20
-  suspicious_network: 14
-  combo_sensitive_archive_network: 45
-  combo_cleanup_plus_sensitive: 35
-  combo_privilege_followup: 35
-  combo_credential_exfil: 50
-  correlated_agent_audit_network: 30
+  sensitive_file_access: 4
+  credential_access: 8
+  compression_archive: 4
+  network_exfil: 6
+  destructive_command: 80
+  privilege_escalation: 8
+  trace_cleanup: 8
+  agent_tool_abuse: 6
+  suspicious_network: 3
+  combo_sensitive_archive_network: 60
+  combo_sensitive_upload: 56
+  combo_sensitive_network_post: 56
+  combo_cleanup_plus_sensitive: 55
+  combo_privilege_followup: 55
+  combo_credential_exfil: 75
+  combo_shell_sensitive_network: 60
+  correlated_agent_audit_network: 55
 
 keywords:
   sensitive_paths:
@@ -22,9 +25,6 @@ keywords:
     - .ssh/
     - id_rsa
     - authorized_keys
-    - /home/
-    - /root/
-    - /var/log/
   credential_keywords:
     - token
     - secret
@@ -49,7 +49,6 @@ keywords:
     - gzip
     - 7z
     - rar
-    - archive
   upload_tools:
     - curl
     - wget
@@ -110,4 +109,3 @@ keywords:
     - webhook
     - ngrok
     - requestbin
-

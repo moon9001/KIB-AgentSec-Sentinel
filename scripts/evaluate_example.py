@@ -40,8 +40,23 @@ def main() -> int:
     if pred is None or truth is None:
         return 0
     common = sorted(set(pred) & set(truth))
+    missing_predictions = sorted(set(truth) - set(pred))
+    extra_predictions = sorted(set(pred) - set(truth))
     if not common:
-        print(json.dumps({"status": "skipped", "reason": "no overlapping md5 values"}, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                {
+                    "status": "skipped",
+                    "reason": "no overlapping md5 values",
+                    "truth_count": len(truth),
+                    "pred_count": len(pred),
+                    "missing_predictions": missing_predictions[:50],
+                    "extra_predictions": extra_predictions[:50],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
         return 0
 
     tp = sum(1 for md5 in common if pred[md5] == 1 and truth[md5] == 1)
@@ -55,12 +70,15 @@ def main() -> int:
     metrics = {
         "status": "ok",
         "sample_count": total,
+        "truth_count": len(truth),
+        "pred_count": len(pred),
         "accuracy": (tp + tn) / total if total else 0.0,
         "precision": precision,
         "recall": recall,
         "f1": f1,
         "confusion_matrix": {"tp": tp, "tn": tn, "fp": fp, "fn": fn},
-        "missing_predictions": sorted(set(truth) - set(pred))[:20],
+        "missing_predictions": missing_predictions,
+        "extra_predictions": extra_predictions,
     }
     print(json.dumps(metrics, ensure_ascii=False, indent=2))
     return 0

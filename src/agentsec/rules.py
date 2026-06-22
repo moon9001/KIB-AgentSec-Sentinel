@@ -12,29 +12,33 @@ class RuleEngine:
         self.rules_config = rules_config
         self.keywords = rules_config.get("keywords", {})
         self.weights = rules_config.get("weights", {})
-        self.excerpt_chars = int((output_config or {}).get("evidence_excerpt_chars", 240))
+        output_config = output_config or {}
+        self.excerpt_chars = int(output_config.get("evidence_excerpt_max_chars", output_config.get("evidence_excerpt_chars", 240)))
 
     def evaluate(self, events: list[Event], pcap_features: dict[str, Any]) -> tuple[list[RuleHit], dict[str, Any]]:
         hits: list[RuleHit] = []
 
         sensitive_events = self._matching_events(events, self._is_sensitive_access)
         credential_events = self._matching_events(events, self._is_credential_access)
-        compression_events = self._matching_events(events, self._has_keywords("compression_tools"))
-        network_events = self._matching_events(events, self._has_keywords("upload_tools"))
-        destructive_events = self._matching_events(events, self._has_keywords("destructive_commands"))
+        compression_events = self._matching_events(events, self._is_archive_action)
+        network_events = self._matching_events(events, self._is_network_exfil_event)
+        destructive_events = self._matching_events(events, self._is_destructive_action)
         privilege_events = self._matching_events(events, self._is_privilege_action)
         cleanup_events = self._matching_events(events, self._has_keywords("trace_cleanup_commands"))
         agent_tool_events = self._matching_events(events, self._is_agent_tool_abuse)
         suspicious_network = self._is_suspicious_network(pcap_features)
+        network_post = int(pcap_features.get("http_post_count") or 0) > 0
+        shell_events = self._matching_events(events, self._is_shell_or_cmd_event)
+        copy_events = self._matching_events(events, self._is_copy_action)
 
-        self._add_if(hits, "R001", "Sensitive file or directory access", "file", "medium", "sensitive_file_access", sensitive_events)
-        self._add_if(hits, "R002", "Credential material access", "credential", "high", "credential_access", credential_events)
-        self._add_if(hits, "R003", "Archive or compression activity", "archive", "medium", "compression_archive", compression_events)
-        self._add_if(hits, "R004", "Network upload or exfiltration marker", "network", "high", "network_exfil", network_events)
-        self._add_if(hits, "R005", "Destructive command marker", "destructive", "critical", "destructive_command", destructive_events)
-        self._add_if(hits, "R006", "Privilege escalation or permission change", "privilege", "high", "privilege_escalation", privilege_events)
-        self._add_if(hits, "R007", "Trace cleanup or session deletion", "cleanup", "high", "trace_cleanup", cleanup_events)
-        self._add_if(hits, "R008", "Suspicious agent tool use with risky action", "agent", "high", "agent_tool_abuse", agent_tool_events)
+        self._add_if(hits, "R001", "Sensitive file or directory access", "file", "low", "sensitive_file_access", sensitive_events)
+        self._add_if(hits, "R002", "Credential material access", "credential", "medium", "credential_access", credential_events)
+        self._add_if(hits, "R003", "Archive or compression command", "archive", "low", "compression_archive", compression_events)
+        self._add_if(hits, "R004", "Network upload or exfiltration command", "network", "medium", "network_exfil", network_events)
+        self._add_if(hits, "R005", "Destructive command marker", "destructive", "terminal", "destructive_command", destructive_events)
+        self._add_if(hits, "R006", "Privilege escalation or permission change", "privilege", "medium", "privilege_escalation", privilege_events)
+        self._add_if(hits, "R007", "Trace cleanup or session deletion", "cleanup", "medium", "trace_cleanup", cleanup_events)
+        self._add_if(hits, "R008", "Agent shell/tool action with risky context", "agent", "medium", "agent_tool_abuse", agent_tool_events)
 
         if suspicious_network:
             hits.append(
@@ -42,81 +46,142 @@ class RuleEngine:
                     "R009",
                     "Suspicious network behavior in PCAP",
                     "network",
-                    "medium",
+                    "low",
                     "suspicious_network",
                     pcap_features,
                 )
             )
 
-        if sensitive_events and compression_events and (network_events or suspicious_network):
+        if sensitive_events and compression_events and (network_events or network_post):
             hits.append(
                 self._combo_hit(
                     "R101",
                     "Sensitive access followed by archive and network transfer",
                     "combo",
-                    "critical",
+                    "chain",
                     "combo_sensitive_archive_network",
-                    [sensitive_events[0], compression_events[0], (network_events or [])[0] if network_events else None],
-                    pcap_features if suspicious_network else None,
+                    [sensitive_events[0], compression_events[0], (network_events or [None])[0]],
+                    pcap_features if network_post else None,
                 )
             )
-        if cleanup_events and (sensitive_events or credential_events or network_events):
+        if sensitive_events and network_events:
+            hits.append(
+                self._combo_hit(
+                    "R106",
+                    "Sensitive access with explicit upload or transfer command",
+                    "combo",
+                    "chain",
+                    "combo_sensitive_upload",
+                    [sensitive_events[0], network_events[0]],
+                )
+            )
+        if sensitive_events and network_post:
+            hits.append(
+                self._combo_hit(
+                    "R107",
+                    "Sensitive access with HTTP POST network evidence",
+                    "combo",
+                    "chain",
+                    "combo_sensitive_network_post",
+                    [sensitive_events[0]],
+                    pcap_features,
+                )
+            )
+        if cleanup_events and (sensitive_events or credential_events):
             hits.append(
                 self._combo_hit(
                     "R102",
                     "Trace cleanup combined with sensitive behavior",
                     "combo",
-                    "critical",
+                    "chain",
                     "combo_cleanup_plus_sensitive",
-                    [cleanup_events[0], (credential_events or sensitive_events or network_events)[0]],
+                    [cleanup_events[0], (credential_events or sensitive_events)[0]],
                 )
             )
-        if privilege_events and (sensitive_events or network_events or compression_events):
+        if privilege_events and sensitive_events:
             hits.append(
                 self._combo_hit(
                     "R103",
-                    "Privilege change followed by file or network activity",
+                    "Privilege change with sensitive access",
                     "combo",
-                    "critical",
+                    "chain",
                     "combo_privilege_followup",
-                    [privilege_events[0], (sensitive_events or network_events or compression_events)[0]],
+                    [privilege_events[0], sensitive_events[0]],
                 )
             )
-        if credential_events and (compression_events or network_events or suspicious_network):
+        if credential_events and (copy_events or compression_events or network_events or network_post):
             hits.append(
                 self._combo_hit(
                     "R104",
                     "Credential access with packaging or transfer evidence",
                     "combo",
-                    "critical",
+                    "terminal",
                     "combo_credential_exfil",
-                    [credential_events[0], (compression_events or network_events or [None])[0]],
-                    pcap_features if suspicious_network else None,
+                    [credential_events[0], (copy_events or compression_events or network_events or [None])[0]],
+                    pcap_features if network_post else None,
                 )
             )
-        if agent_tool_events and (network_events or suspicious_network) and (sensitive_events or credential_events):
+        if shell_events and sensitive_events and (network_events or network_post):
+            hits.append(
+                self._combo_hit(
+                    "R108",
+                    "Shell command with sensitive path and network transfer",
+                    "combo",
+                    "chain",
+                    "combo_shell_sensitive_network",
+                    [shell_events[0], sensitive_events[0], (network_events or [None])[0]],
+                    pcap_features if network_post else None,
+                )
+            )
+        if agent_tool_events and (network_events or network_post) and (sensitive_events or credential_events):
             hits.append(
                 self._combo_hit(
                     "R105",
                     "Agent tool behavior correlated with audit or network evidence",
                     "combo",
-                    "high",
+                    "chain",
                     "correlated_agent_audit_network",
                     [agent_tool_events[0], (sensitive_events or credential_events)[0], (network_events or [None])[0]],
-                    pcap_features if suspicious_network else None,
+                    pcap_features if network_post else None,
                 )
             )
+
+        strong_chain_rules = {hit.rule_id for hit in hits if hit.severity in {"chain", "terminal"}}
+        strong_categories = sorted(
+            {
+                category
+                for category, active in {
+                    "sensitive": bool(sensitive_events),
+                    "credential": bool(credential_events),
+                    "archive": bool(compression_events),
+                    "network": bool(network_events or network_post),
+                    "privilege": bool(privilege_events),
+                    "cleanup": bool(cleanup_events),
+                    "destructive": bool(destructive_events),
+                    "agent": bool(agent_tool_events or shell_events),
+                }.items()
+                if active
+            }
+        )
 
         signals = {
             "sensitive_access": bool(sensitive_events),
             "credential_access": bool(credential_events),
             "compression": bool(compression_events),
             "network_transfer": bool(network_events),
+            "network_post": bool(network_post),
             "destructive": bool(destructive_events),
             "privilege": bool(privilege_events),
             "trace_cleanup": bool(cleanup_events),
             "agent_tool_abuse": bool(agent_tool_events),
+            "shell_or_cmd": bool(shell_events),
+            "copy_or_download": bool(copy_events),
             "suspicious_pcap": bool(suspicious_network),
+            "strong_chain": bool(strong_chain_rules),
+            "terminal_rule": bool(any(hit.severity == "terminal" for hit in hits)),
+            "strong_chain_rules": sorted(strong_chain_rules),
+            "strong_categories": strong_categories,
+            "strong_category_count": len(strong_categories),
             "hit_count": len(hits),
         }
         return hits, signals
@@ -128,12 +193,43 @@ class RuleEngine:
         needles = self.keywords.get(key, [])
         return lambda event: contains_any(event.text, needles)
 
+    def _command_text(self, event: Event) -> str:
+        fields = event.fields or {}
+        values = [
+            event.event_type,
+            fields.get("tool"),
+            fields.get("action"),
+            fields.get("cmd"),
+            fields.get("name"),
+            fields.get("function_call"),
+            fields.get("params"),
+            fields.get("args"),
+            fields.get("comm"),
+            fields.get("exe"),
+            fields.get("proctitle"),
+            fields.get("a0"),
+            fields.get("a1"),
+            fields.get("a2"),
+            fields.get("a3"),
+        ]
+        return " ".join(str(value) for value in values if value not in (None, "")).lower()
+
     def _is_sensitive_access(self, event: Event) -> bool:
         text = event.text.lower()
         sensitive = contains_any(text, self.keywords.get("sensitive_paths", []))
         credential = contains_any(text, self.keywords.get("credential_keywords", []))
         read_marker = contains_any(text, self.keywords.get("read_markers", []))
         path_marker = "/" in text or "\\" in text or event.source == "audit"
+        command_context = self._command_text(event)
+        benign_session_type = event.source == "session" and event.event_type in {
+            "session",
+            "message",
+            "model_change",
+            "thinking_level_change",
+            "custom",
+        }
+        if benign_session_type and not contains_any(command_context, self.keywords.get("read_markers", [])):
+            return False
         return (sensitive and (read_marker or path_marker)) or (credential and read_marker)
 
     def _is_credential_access(self, event: Event) -> bool:
@@ -142,6 +238,38 @@ class RuleEngine:
         strong_path = any(marker in text for marker in ["id_rsa", "/etc/shadow", "authorized_keys", "private key"])
         read_marker = contains_any(text, self.keywords.get("read_markers", []))
         return strong_path or (credential and read_marker)
+
+    def _is_archive_action(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if event.source == "audit" and event.event_type not in {"execve", "proctitle", "syscall"}:
+            return False
+        return contains_any(command_text, self.keywords.get("compression_tools", []))
+
+    def _is_network_exfil_event(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if event.source == "audit" and event.event_type not in {"execve", "proctitle", "syscall"}:
+            return False
+        return contains_any(command_text, self.keywords.get("upload_tools", []))
+
+    def _is_destructive_action(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if event.source == "audit" and event.event_type not in {"execve", "proctitle", "syscall"}:
+            return False
+        if event.source == "session" and event.event_type in {"message", "session", "model_change", "thinking_level_change", "custom"}:
+            return False
+        return contains_any(command_text, self.keywords.get("destructive_commands", []))
+
+    def _is_copy_action(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        return contains_any(command_text, ["copy", "cp", "download", "write_file"])
+
+    def _is_shell_or_cmd_event(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if event.source == "session":
+            return contains_any(command_text, self.keywords.get("shell_tools", []))
+        if event.source == "audit" and event.event_type in {"execve", "proctitle", "syscall"}:
+            return contains_any(command_text, ["bash", "sh", "zsh", "python", "perl"])
+        return False
 
     def _is_agent_tool_abuse(self, event: Event) -> bool:
         if event.source != "session":
@@ -163,14 +291,15 @@ class RuleEngine:
         ).lower()
         text = f"{tool_text} {event.text.lower()}"
         tool_marker = contains_any(tool_text, self.keywords.get("suspicious_agent_tools", []))
+        shell_marker = contains_any(tool_text, self.keywords.get("shell_tools", []))
         risky_action = (
-            contains_any(tool_text, self.keywords.get("shell_tools", []))
-            or contains_any(text, self.keywords.get("sensitive_paths", []))
+            contains_any(text, self.keywords.get("sensitive_paths", []))
             or contains_any(text, self.keywords.get("upload_tools", []))
             or contains_any(text, self.keywords.get("privilege_tools", []))
             or contains_any(text, self.keywords.get("trace_cleanup_commands", []))
+            or contains_any(text, self.keywords.get("destructive_commands", []))
         )
-        return tool_marker and risky_action
+        return tool_marker and shell_marker and risky_action
 
     def _is_privilege_action(self, event: Event) -> bool:
         text = event.text.lower()
@@ -203,7 +332,6 @@ class RuleEngine:
         if not features:
             return False
         http_post = int(features.get("http_post_count") or 0) > 0
-        external = int(features.get("external_ip_count") or 0) >= 1
         ports = set(int(port) for port in features.get("dst_ports") or [])
         suspicious_ports = set(int(port) for port in self.rules_config.get("pcap", {}).get("suspicious_nonstandard_ports", []))
         if not suspicious_ports:
@@ -214,7 +342,7 @@ class RuleEngine:
             if contains_any(str(host), self.keywords.get("suspicious_domains", [])):
                 suspicious_domain = True
                 break
-        return http_post or external or bool(ports & suspicious_ports) or suspicious_domain
+        return http_post or bool(ports & suspicious_ports) or suspicious_domain
 
     def _add_if(
         self,

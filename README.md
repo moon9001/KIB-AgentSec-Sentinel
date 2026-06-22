@@ -67,6 +67,17 @@ python3 scripts/evaluate_example.py \
 
 If the truth file is absent or lacks labels, evaluation exits cleanly with a skipped status.
 
+## Diagnostics
+
+Use these helpers after a labeled local validation run:
+
+```bash
+python3 scripts/analyze_predictions.py --pred output/result_rule.csv --truth data/example/example-s7/results.csv --detail output/detail_rule.jsonl
+python3 scripts/threshold_sweep.py --detail output/detail_rule.jsonl --truth data/example/example-s7/results.csv
+```
+
+`analyze_predictions.py` reports prediction coverage, TP/TN/FP/FN counts, FP/FN detail summaries, FP rule ranking, and rules that hit every detail row. `threshold_sweep.py` reports accuracy, precision, recall, f1, TP, TN, FP, and FN across score thresholds.
+
 ## Optional LLM Attribution
 
 The detector is rule-first. LLM attribution is optional and only used for medium or higher rule scores.

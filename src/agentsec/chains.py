@@ -13,7 +13,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
 
     chains: list[dict[str, Any]] = []
     if signals.get("sensitive_access") and signals.get("compression") and (
-        signals.get("network_transfer") or signals.get("suspicious_pcap")
+        signals.get("network_transfer") or signals.get("network_post")
     ):
         chains.append(
             {
@@ -26,7 +26,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
         )
 
     if signals.get("credential_access") and (
-        signals.get("network_transfer") or signals.get("compression") or signals.get("suspicious_pcap")
+        signals.get("network_transfer") or signals.get("compression") or signals.get("network_post") or signals.get("copy_or_download")
     ):
         chains.append(
             {
@@ -38,7 +38,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
-    if signals.get("trace_cleanup"):
+    if signals.get("trace_cleanup") and (signals.get("sensitive_access") or signals.get("credential_access")):
         chains.append(
             {
                 "chain_id": f"{md5}:trace-cleanup",
@@ -49,7 +49,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
-    if signals.get("privilege"):
+    if signals.get("privilege") and signals.get("sensitive_access"):
         chains.append(
             {
                 "chain_id": f"{md5}:privilege-followup",
@@ -71,6 +71,19 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
+    if signals.get("shell_or_cmd") and signals.get("sensitive_access") and (
+        signals.get("network_transfer") or signals.get("network_post")
+    ):
+        chains.append(
+            {
+                "chain_id": f"{md5}:shell-sensitive-network",
+                "title": "Shell command with sensitive path and network transfer",
+                "risk": "high",
+                "steps": ["shell_or_cmd", "sensitive_access", "network_transfer"],
+                "supporting_rules": sorted(set(hit_by_category.get("agent", []) + hit_by_category.get("file", []) + hit_by_category.get("network", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
     if not chains and hits:
         chains.append(
             {
@@ -82,4 +95,3 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
     return chains
-
