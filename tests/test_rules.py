@@ -122,6 +122,52 @@ def test_credential_access_through_shell_is_strong_chain() -> None:
     assert score >= SCORING["score_threshold"]
 
 
+def test_api_key_discussion_and_llm_paths_do_not_trigger_r109() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="session",
+            event_type="message",
+            text="We should configure an OpenAI API key for /v1/chat/completions and openai-completions later.",
+            fields={"content": "OpenAI API key discussion only"},
+        ),
+        Event(
+            md5="synthetic",
+            source="session",
+            event_type="tool_call",
+            text='{"tool":"cmd_run","cmd":"echo health check"}',
+            fields={"tool": "cmd_run", "cmd": "echo health check"},
+        ),
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R109" not in {hit.rule_id for hit in hits}
+    assert signals["credential_shell_access"] is False
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < SCORING["score_threshold"]
+
+
+def test_shell_reading_shadow_still_triggers_r109() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="bash" a1="-lc" a2="grep root /etc/shadow"',
+            fields={"a0": "bash", "a1": "-lc", "a2": "grep root /etc/shadow"},
+        )
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R109" in {hit.rule_id for hit in hits}
+    assert signals["credential_shell_access"] is True
+    assert label == 1
+    assert score >= SCORING["score_threshold"]
+
+
 def test_privilege_shell_with_network_context_is_strong_chain() -> None:
     engine = RuleEngine(DEFAULT_RULES)
     events = [

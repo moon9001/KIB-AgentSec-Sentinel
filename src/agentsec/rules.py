@@ -20,6 +20,7 @@ class RuleEngine:
 
         sensitive_events = self._matching_events(events, self._is_sensitive_access)
         credential_events = self._matching_events(events, self._is_credential_access)
+        credential_shell_events = self._matching_events(events, self._is_credential_shell_access)
         compression_events = self._matching_events(events, self._is_archive_action)
         network_events = self._matching_events(events, self._is_network_exfil_event)
         destructive_events = self._matching_events(events, self._is_destructive_action)
@@ -99,7 +100,7 @@ class RuleEngine:
                     [cleanup_events[0], (credential_events or sensitive_events)[0]],
                 )
             )
-        if credential_events and shell_events:
+        if credential_shell_events:
             hits.append(
                 self._combo_hit(
                     "R109",
@@ -107,7 +108,7 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_credential_shell",
-                    [credential_events[0], shell_events[0]],
+                    [credential_shell_events[0]],
                 )
             )
         if privilege_events and sensitive_events:
@@ -182,7 +183,7 @@ class RuleEngine:
                     "privilege": bool(privilege_events),
                     "cleanup": bool(cleanup_events),
                     "destructive": bool(destructive_events),
-                    "agent": bool(agent_tool_events or shell_events),
+                    "agent": bool(agent_tool_events or shell_events or credential_shell_events),
                 }.items()
                 if active
             }
@@ -199,7 +200,8 @@ class RuleEngine:
             "privilege": bool(privilege_events),
             "trace_cleanup": bool(cleanup_events),
             "agent_tool_abuse": bool(agent_tool_events),
-            "shell_or_cmd": bool(shell_events),
+            "shell_or_cmd": bool(shell_events or credential_shell_events),
+            "credential_shell_access": bool(credential_shell_events),
             "copy_or_download": bool(copy_events),
             "suspicious_pcap": bool(suspicious_network),
             "strong_chain": bool(strong_chain_rules),
@@ -239,6 +241,45 @@ class RuleEngine:
         ]
         return " ".join(str(value) for value in values if value not in (None, "")).lower()
 
+    def _is_plain_session_text(self, event: Event) -> bool:
+        if event.source != "session":
+            return False
+        if event.event_type in {"session", "message", "model_change", "thinking", "thinking_level_change", "custom"}:
+            return True
+        fields = event.fields or {}
+        command_fields = ["tool", "action", "cmd", "function_call", "params", "args"]
+        return not any(fields.get(key) not in (None, "") for key in command_fields)
+
+    def _is_llm_api_discussion_text(self, text: str) -> bool:
+        benign_markers = [
+            "openai",
+            "completions",
+            "openai-completions",
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/responses",
+            "api key",
+        ]
+        return contains_any(text, benign_markers)
+
+    def _has_real_credential_artifact(self, text: str) -> bool:
+        lower = text.lower()
+        if any(marker in lower for marker in ["/etc/shadow", "id_rsa", "authorized_keys", "private key"]):
+            return True
+        if re.search(r"[/\\][^\s\"']*(token|secret|credential|password|shadow|api[_-]?key)[^\s\"']*", lower):
+            return True
+        if re.search(r"\b(env|printenv)\b", lower) and re.search(r"\b(token|secret|credential|password|api[_-]?key|access[_-]?key)\b", lower):
+            return True
+        return False
+
+    def _is_command_access_context(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if event.source == "audit" and event.event_type in {"execve", "proctitle", "syscall"}:
+            return bool(command_text)
+        if event.source == "session":
+            return contains_any(command_text, ["cmd_run", "shell", "bash", "sh", "read_file", "cat", "grep", "cp", "tar"])
+        return False
+
     def _is_sensitive_access(self, event: Event) -> bool:
         text = event.text.lower()
         sensitive = contains_any(text, self.keywords.get("sensitive_paths", []))
@@ -259,10 +300,31 @@ class RuleEngine:
 
     def _is_credential_access(self, event: Event) -> bool:
         text = event.text.lower()
+        if self._is_plain_session_text(event):
+            return False
+        if self._is_llm_api_discussion_text(text) and not self._has_real_credential_artifact(text):
+            return False
         credential = contains_any(text, self.keywords.get("credential_keywords", []))
         strong_path = any(marker in text for marker in ["id_rsa", "/etc/shadow", "authorized_keys", "private key"])
         read_marker = contains_any(text, self.keywords.get("read_markers", []))
         return strong_path or (credential and read_marker)
+
+    def _is_credential_shell_access(self, event: Event) -> bool:
+        if self._is_plain_session_text(event):
+            return False
+        command_text = self._command_text(event)
+        combined = f"{command_text} {event.text.lower()}"
+        if self._is_llm_api_discussion_text(combined) and not self._has_real_credential_artifact(combined):
+            return False
+        if not self._is_command_access_context(event):
+            return False
+        access_action = contains_any(
+            command_text,
+            ["cat", "grep", "cp", "tar", "zip", "read_file", "download", "env", "printenv", "awk", "sed"],
+        )
+        if not access_action:
+            return False
+        return self._has_real_credential_artifact(combined)
 
     def _is_archive_action(self, event: Event) -> bool:
         command_text = self._command_text(event)
