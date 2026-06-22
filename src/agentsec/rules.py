@@ -26,8 +26,8 @@ class RuleEngine:
         privilege_events = self._matching_events(events, self._is_privilege_action)
         cleanup_events = self._matching_events(events, self._has_keywords("trace_cleanup_commands"))
         agent_tool_events = self._matching_events(events, self._is_agent_tool_abuse)
-        suspicious_network = self._is_suspicious_network(pcap_features)
-        network_post = int(pcap_features.get("http_post_count") or 0) > 0
+        network_post = self._is_network_post_exfil(pcap_features)
+        suspicious_network = self._is_suspicious_network(pcap_features, network_post)
         shell_events = self._matching_events(events, self._is_shell_or_cmd_event)
         copy_events = self._matching_events(events, self._is_copy_action)
 
@@ -328,21 +328,67 @@ class RuleEngine:
             for command in ["sudo", "su", "chown", "passwd"]
         )
 
-    def _is_suspicious_network(self, features: dict[str, Any]) -> bool:
+    def _counter_items(self, value: Any) -> list[str]:
+        items: list[str] = []
+        if isinstance(value, dict):
+            return [str(key) for key in value]
+        if isinstance(value, list):
+            for item in value:
+                if isinstance(item, (list, tuple)) and item:
+                    items.append(str(item[0]))
+                elif isinstance(item, dict):
+                    first = item.get("value") or item.get("name") or item.get("host") or item.get("path")
+                    if first:
+                        items.append(str(first))
+                elif item not in (None, ""):
+                    items.append(str(item))
+        return items
+
+    def _is_benign_model_api_pcap(self, features: dict[str, Any]) -> bool:
+        http_post = int(features.get("http_post_count") or 0)
+        if http_post <= 0:
+            return False
+        hosts = [item.lower() for item in self._counter_items(features.get("http_hosts"))]
+        paths = [item.lower() for item in self._counter_items(features.get("http_paths"))]
+        agents = [item.lower() for item in self._counter_items(features.get("user_agents"))]
+        keywords = self.keywords
+        benign_hosts = keywords.get("benign_llm_hosts", [])
+        benign_paths = keywords.get("benign_llm_paths", [])
+        benign_agents = keywords.get("benign_llm_user_agents", [])
+        host_ok = not hosts or all(contains_any(host, benign_hosts) for host in hosts)
+        path_ok = bool(paths) and all(contains_any(path, benign_paths) for path in paths)
+        agent_ok = not agents or any(contains_any(agent, benign_agents) for agent in agents)
+        return host_ok and path_ok and agent_ok
+
+    def _is_network_post_exfil(self, features: dict[str, Any]) -> bool:
+        http_post = int(features.get("http_post_count") or 0)
+        if http_post <= 0:
+            return False
+        if self._is_benign_model_api_pcap(features):
+            return False
+        paths = self._counter_items(features.get("http_paths"))
+        hosts = self._counter_items(features.get("http_hosts"))
+        require_details = bool(self.rules_config.get("network", {}).get("require_http_details_for_post", True))
+        if require_details and not paths and not hosts:
+            return False
+        suspicious_domain = any(contains_any(host, self.keywords.get("suspicious_domains", [])) for host in hosts)
+        transfer_path = any(contains_any(path, self.keywords.get("upload_tools", [])) for path in paths)
+        return suspicious_domain or transfer_path or not require_details
+
+    def _is_suspicious_network(self, features: dict[str, Any], network_post: bool = False) -> bool:
         if not features:
             return False
-        http_post = int(features.get("http_post_count") or 0) > 0
         ports = set(int(port) for port in features.get("dst_ports") or [])
         suspicious_ports = set(int(port) for port in self.rules_config.get("pcap", {}).get("suspicious_nonstandard_ports", []))
         if not suspicious_ports:
             suspicious_ports = {4444, 5555, 6667, 8081, 9001, 1337}
         suspicious_domain = False
-        hosts = [host for host, _count in features.get("http_hosts") or []]
+        hosts = self._counter_items(features.get("http_hosts"))
         for host in hosts:
             if contains_any(str(host), self.keywords.get("suspicious_domains", [])):
                 suspicious_domain = True
                 break
-        return http_post or bool(ports & suspicious_ports) or suspicious_domain
+        return network_post or bool(ports & suspicious_ports) or suspicious_domain
 
     def _add_if(
         self,

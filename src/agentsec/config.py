@@ -80,7 +80,11 @@ DEFAULT_RULES: dict[str, Any] = {
         "suspicious_agent_tools": ["openclaw", "gateway", "file_home", "cmd_run", "shell", "network", "upload", "read_file"],
         "shell_tools": ["cmd_run", "shell", "bash", "sh"],
         "suspicious_domains": ["paste", "transfer", "webhook", "ngrok", "requestbin"],
+        "benign_llm_hosts": ["llm", "localhost", "127.0.0.1", "openai"],
+        "benign_llm_paths": ["/v1/chat/completions", "/v1/completions", "/v1/responses", "/health"],
+        "benign_llm_user_agents": ["openai", "python-requests"],
     },
+    "network": {"require_http_details_for_post": True},
 }
 
 
