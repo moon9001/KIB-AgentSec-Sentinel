@@ -14,14 +14,14 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def read_labels(path: Path) -> dict[str, int] | None:
+def read_labels(path: Path, role: str) -> dict[str, int] | None:
     if not path.exists():
-        print(json.dumps({"status": "skipped", "reason": f"truth file not found: {path}"}, ensure_ascii=False, indent=2))
+        print(json.dumps({"status": "skipped", "reason": f"{role} file not found: {path}"}, ensure_ascii=False, indent=2))
         return None
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
         if not reader.fieldnames or "md5" not in reader.fieldnames or "label" not in reader.fieldnames:
-            print(json.dumps({"status": "skipped", "reason": "truth file has no md5,label columns"}, ensure_ascii=False, indent=2))
+            print(json.dumps({"status": "skipped", "reason": f"{role} file has no md5,label columns"}, ensure_ascii=False, indent=2))
             return None
         labels: dict[str, int] = {}
         for row in reader:
@@ -35,8 +35,8 @@ def read_labels(path: Path) -> dict[str, int] | None:
 
 def main() -> int:
     args = parse_args()
-    pred = read_labels(Path(args.pred))
-    truth = read_labels(Path(args.truth))
+    pred = read_labels(Path(args.pred), "pred")
+    truth = read_labels(Path(args.truth), "truth")
     if pred is None or truth is None:
         return 0
     common = sorted(set(pred) & set(truth))
@@ -68,4 +68,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
