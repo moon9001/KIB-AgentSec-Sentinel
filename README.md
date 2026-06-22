@@ -96,6 +96,14 @@ export AGENTSEC_LLM_MODEL="qwen36-27b"
 export AGENTSEC_LLM_API_KEY=""
 ```
 
+Temporary DeepSeek smoke tests are supported, but should not be used for official offline runs:
+
+```bash
+export AGENTSEC_LLM_PROVIDER="deepseek"
+export DEEPSEEK_API_KEY="<set locally only>"
+export AGENTSEC_ALLOW_EXTERNAL_LLM="1"
+```
+
 ## Offline Mode
 
 For official offline runs, install dependencies ahead of time, keep `configs/default.yaml` pointing at the local endpoint, and run without network access. The main detector does not require an LLM service.
@@ -105,4 +113,3 @@ For official offline runs, install dependencies ahead of time, keep `configs/def
 - Do not commit official samples, zips, PCAPs, logs, CSV results, keys, or environment files.
 - Do not place accounts, passwords, AK/SK, SFTP, OBS, or API tokens in code or configuration.
 - `detail.jsonl` is for local debugging only and may contain redacted evidence excerpts from input logs.
-

@@ -15,8 +15,14 @@ LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1", "0.0.0.0"}
 class LLMAnalyzer:
     def __init__(self, llm_config: dict[str, Any]) -> None:
         self.config = llm_config
-        self.base_url = os.getenv("AGENTSEC_LLM_BASE_URL", str(llm_config.get("base_url", "http://127.0.0.1:8000/v1")))
-        self.model = os.getenv("AGENTSEC_LLM_MODEL", str(llm_config.get("model", "qwen36-27b")))
+        provider = os.getenv("AGENTSEC_LLM_PROVIDER", "").lower().strip()
+        default_base_url = str(llm_config.get("base_url", "http://127.0.0.1:8000/v1"))
+        default_model = str(llm_config.get("model", "qwen36-27b"))
+        if provider == "deepseek":
+            default_base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+            default_model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash")
+        self.base_url = os.getenv("AGENTSEC_LLM_BASE_URL", default_base_url)
+        self.model = os.getenv("AGENTSEC_LLM_MODEL", default_model)
         self.timeout = float(os.getenv("AGENTSEC_LLM_TIMEOUT", str(llm_config.get("timeout_seconds", 8))))
         self.api_key = (
             os.getenv("AGENTSEC_LLM_API_KEY")
@@ -135,4 +141,3 @@ class LLMAnalyzer:
             "summary": "Rule-only analysis; LLM was not used.",
             "recommendation": "Review detail.jsonl evidence and validate against the original offline sample if needed.",
         }
-
