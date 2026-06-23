@@ -8,6 +8,8 @@ scoring:
   weak_signal_score_cap: 32
   require_chain_for_label1: true
   min_strong_categories_for_label1: 2
+  terminal_rule_ids:
+    - R005
   llm_min_score: 4
   llm_correction_min_confidence: 0.85
   risk_levels:
@@ -17,6 +19,11 @@ scoring:
     critical: 82
 
 rules:
+  profile_behavior:
+    credential_shell_requires_same_event: true
+    credential_exfil_requires_command: true
+    sensitive_chain_requires_command: true
+    include_network_observed_as_strong_category: false
   weights:
     combo_sensitive_archive_network: 64
     combo_sensitive_upload: 60
@@ -57,4 +64,3 @@ pcap:
 output:
   evidence_excerpt_chars: 240
   evidence_excerpt_max_chars: 240
-

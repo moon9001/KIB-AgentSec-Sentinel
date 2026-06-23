@@ -9,6 +9,8 @@ scoring:
   weak_signal_score_cap: 34
   require_chain_for_label1: true
   min_strong_categories_for_label1: 2
+  terminal_rule_ids:
+    - R005
   llm_min_score: 4
   llm_correction_min_confidence: 0.8
   default_label_on_error: 0
@@ -57,3 +59,9 @@ output:
   evidence_excerpt_chars: 240
   evidence_excerpt_max_chars: 240
 
+rules:
+  profile_behavior:
+    credential_shell_requires_same_event: true
+    credential_exfil_requires_command: true
+    sensitive_chain_requires_command: true
+    include_network_observed_as_strong_category: false

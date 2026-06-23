@@ -16,23 +16,38 @@ def score_hits(hits: list[RuleHit], scoring_config: dict[str, Any], signals: dic
     weak_cap = float(scoring_config.get("weak_signal_score_cap", max(0, score_threshold - 1)))
     require_chain = bool(scoring_config.get("require_chain_for_label1", True))
     min_strong_categories = int(scoring_config.get("min_strong_categories_for_label1", 2))
+    terminal_rule_ids = set(scoring_config.get("terminal_rule_ids", ["R005"]))
 
-    has_terminal = bool(signals.get("terminal_rule")) or any(hit.severity == "terminal" for hit in hits)
-    has_strong_chain = bool(signals.get("strong_chain")) or any(hit.severity == "chain" for hit in hits)
+    terminal_hits = [hit for hit in hits if hit.severity == "terminal" and hit.rule_id in terminal_rule_ids]
+    chain_hits = [hit for hit in hits if hit.severity in {"chain", "terminal"}]
+    max_chain_weight = max((float(hit.weight) for hit in chain_hits), default=0.0)
+
+    has_terminal = bool(terminal_hits)
+    has_strong_chain = bool(chain_hits)
     strong_category_count = int(signals.get("strong_category_count") or 0)
+    qualifying_chain = (
+        has_strong_chain
+        and strong_category_count >= min_strong_categories
+        and (
+            max_chain_weight >= score_threshold
+            or (max_chain_weight >= strong_chain_threshold and score >= score_threshold)
+        )
+    )
 
     if has_terminal:
         score = max(score, strong_chain_threshold)
     elif require_chain and not has_strong_chain:
         score = min(score, weak_cap)
-    elif has_strong_chain and strong_category_count >= min_strong_categories:
+    elif qualifying_chain:
         score = max(score, strong_chain_threshold)
+    elif require_chain:
+        score = min(score, max(0.0, score_threshold - 1.0))
 
     score = min(max_score, score)
     label = 0
     if has_terminal:
         label = 1
-    elif has_strong_chain and strong_category_count >= min_strong_categories and score >= score_threshold:
+    elif qualifying_chain and score >= score_threshold:
         label = 1
     return round(score, 2), label, risk_level(score, scoring_config)
 

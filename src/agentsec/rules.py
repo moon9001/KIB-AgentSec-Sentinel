@@ -12,6 +12,7 @@ class RuleEngine:
         self.rules_config = rules_config
         self.keywords = rules_config.get("keywords", {})
         self.weights = rules_config.get("weights", {})
+        self.behavior = rules_config.get("profile_behavior", {})
         output_config = output_config or {}
         self.excerpt_chars = int(output_config.get("evidence_excerpt_max_chars", output_config.get("evidence_excerpt_chars", 240)))
 
@@ -19,7 +20,9 @@ class RuleEngine:
         hits: list[RuleHit] = []
 
         sensitive_events = self._matching_events(events, self._is_sensitive_access)
+        strong_sensitive_events = self._matching_events(events, self._is_high_confidence_sensitive_access)
         credential_events = self._matching_events(events, self._is_credential_access)
+        strong_credential_events = self._matching_events(events, self._is_high_confidence_credential_access)
         credential_shell_events = self._matching_events(events, self._is_credential_shell_access)
         compression_events = self._matching_events(events, self._is_archive_action)
         network_events = self._matching_events(events, self._is_network_exfil_event)
@@ -62,7 +65,12 @@ class RuleEngine:
                 )
             )
 
-        if sensitive_events and compression_events and (network_events or network_post):
+        strict_credential = bool(self.behavior.get("credential_exfil_requires_command", True))
+        strict_sensitive = bool(self.behavior.get("sensitive_chain_requires_command", True))
+        credential_exfil_events = (credential_shell_events or strong_credential_events) if strict_credential else (credential_events or credential_shell_events or strong_credential_events)
+        sensitive_chain_events = (strong_sensitive_events or credential_exfil_events) if strict_sensitive else (sensitive_events or credential_exfil_events)
+
+        if sensitive_chain_events and compression_events and (network_events or network_post):
             hits.append(
                 self._combo_hit(
                     "R101",
@@ -70,11 +78,11 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_sensitive_archive_network",
-                    [sensitive_events[0], compression_events[0], (network_events or [None])[0]],
+                    [sensitive_chain_events[0], compression_events[0], (network_events or [None])[0]],
                     pcap_features if network_post else None,
                 )
             )
-        if sensitive_events and network_events:
+        if sensitive_chain_events and network_events:
             hits.append(
                 self._combo_hit(
                     "R106",
@@ -82,10 +90,10 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_sensitive_upload",
-                    [sensitive_events[0], network_events[0]],
+                    [sensitive_chain_events[0], network_events[0]],
                 )
             )
-        if sensitive_events and network_post:
+        if sensitive_chain_events and network_post:
             hits.append(
                 self._combo_hit(
                     "R107",
@@ -93,11 +101,11 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_sensitive_network_post",
-                    [sensitive_events[0]],
+                    [sensitive_chain_events[0]],
                     pcap_features,
                 )
             )
-        if cleanup_events and (credential_events or (sensitive_events and (network_events or network_post or privilege_events))):
+        if cleanup_events and (credential_exfil_events or (strong_sensitive_events and (network_events or network_post or privilege_events))):
             hits.append(
                 self._combo_hit(
                     "R102",
@@ -105,10 +113,12 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_cleanup_plus_sensitive",
-                    [cleanup_events[0], (credential_events or sensitive_events)[0]],
+                    [cleanup_events[0], (credential_exfil_events or strong_sensitive_events)[0]],
                 )
             )
-        if credential_shell_events:
+        if credential_shell_events or (
+            not bool(self.behavior.get("credential_shell_requires_same_event", True)) and credential_events and shell_events
+        ):
             hits.append(
                 self._combo_hit(
                     "R109",
@@ -116,10 +126,10 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_credential_shell",
-                    [credential_shell_events[0]],
+                    [credential_shell_events[0] if credential_shell_events else credential_events[0], shell_events[0] if shell_events and not credential_shell_events else None],
                 )
             )
-        if privilege_events and sensitive_events:
+        if privilege_events and strong_sensitive_events:
             hits.append(
                 self._combo_hit(
                     "R103",
@@ -127,7 +137,7 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_privilege_followup",
-                    [privilege_events[0], sensitive_events[0]],
+                    [privilege_events[0], strong_sensitive_events[0]],
                 )
             )
         if privilege_events and shell_events and network_observed:
@@ -165,7 +175,7 @@ class RuleEngine:
                     [persistence_events[0], suspicious_command_events[0]],
                 )
             )
-        if lateral_events and credential_events:
+        if lateral_events and credential_exfil_events:
             hits.append(
                 self._combo_hit(
                     "R113",
@@ -173,22 +183,22 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_lateral_credential",
-                    [lateral_events[0], credential_events[0]],
+                    [lateral_events[0], credential_exfil_events[0]],
                 )
             )
-        if credential_events and (copy_events or compression_events or network_events or network_post):
+        if credential_exfil_events and (copy_events or compression_events or network_events or network_post):
             hits.append(
                 self._combo_hit(
                     "R104",
                     "Credential access with packaging or transfer evidence",
                     "combo",
-                    "terminal",
+                    "chain",
                     "combo_credential_exfil",
-                    [credential_events[0], (copy_events or compression_events or network_events or [None])[0]],
+                    [credential_exfil_events[0], (copy_events or compression_events or network_events or [None])[0]],
                     pcap_features if network_post else None,
                 )
             )
-        if shell_events and sensitive_events and (network_events or network_post):
+        if shell_events and sensitive_chain_events and (network_events or network_post):
             hits.append(
                 self._combo_hit(
                     "R108",
@@ -196,11 +206,11 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_shell_sensitive_network",
-                    [shell_events[0], sensitive_events[0], (network_events or [None])[0]],
+                    [shell_events[0], sensitive_chain_events[0], (network_events or [None])[0]],
                     pcap_features if network_post else None,
                 )
             )
-        if agent_tool_events and (network_events or network_post) and (sensitive_events or credential_events):
+        if agent_tool_events and (network_events or network_post) and (sensitive_chain_events or credential_exfil_events):
             hits.append(
                 self._combo_hit(
                     "R105",
@@ -208,20 +218,21 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "correlated_agent_audit_network",
-                    [agent_tool_events[0], (sensitive_events or credential_events)[0], (network_events or [None])[0]],
+                    [agent_tool_events[0], (sensitive_chain_events or credential_exfil_events)[0], (network_events or [None])[0]],
                     pcap_features if network_post else None,
                 )
             )
 
         strong_chain_rules = {hit.rule_id for hit in hits if hit.severity in {"chain", "terminal"}}
+        max_chain_weight = max((float(hit.weight) for hit in hits if hit.severity in {"chain", "terminal"}), default=0.0)
         strong_categories = sorted(
             {
                 category
                 for category, active in {
                     "sensitive": bool(sensitive_events),
-                    "credential": bool(credential_events),
+                    "credential": bool(strong_credential_events or credential_shell_events),
                     "archive": bool(compression_events),
-                    "network": bool(network_events or network_post or network_observed),
+                    "network": bool(network_events or network_post or (network_observed and self.behavior.get("include_network_observed_as_strong_category", False))),
                     "privilege": bool(privilege_events),
                     "cleanup": bool(cleanup_events),
                     "destructive": bool(destructive_events),
@@ -229,7 +240,6 @@ class RuleEngine:
                     "powershell": bool(suspicious_powershell_events),
                     "persistence": bool(persistence_events),
                     "lateral": bool(lateral_events),
-                    "command": bool(suspicious_command_events),
                 }.items()
                 if active
             }
@@ -238,6 +248,8 @@ class RuleEngine:
         signals = {
             "sensitive_access": bool(sensitive_events),
             "credential_access": bool(credential_events),
+            "strong_sensitive_access": bool(strong_sensitive_events),
+            "strong_credential_access": bool(strong_credential_events),
             "compression": bool(compression_events),
             "network_transfer": bool(network_events),
             "network_post": bool(network_post),
@@ -257,6 +269,7 @@ class RuleEngine:
             "strong_chain": bool(strong_chain_rules),
             "terminal_rule": bool(any(hit.severity == "terminal" for hit in hits)),
             "strong_chain_rules": sorted(strong_chain_rules),
+            "max_chain_weight": max_chain_weight,
             "strong_categories": strong_categories,
             "strong_category_count": len(strong_categories),
             "hit_count": len(hits),
@@ -327,11 +340,23 @@ class RuleEngine:
             return True
         if any(marker.lower() in lower for marker in self.keywords.get("windows_credential_artifacts", [])):
             return True
-        if re.search(r"[/\\][^\s\"']*(token|secret|credential|password|shadow|api[_-]?key)[^\s\"']*", lower):
+        if self._has_sensitive_keyword_path(lower):
             return True
         if re.search(r"\b(env|printenv)\b", lower) and re.search(r"\b(token|secret|credential|password|api[_-]?key|access[_-]?key)\b", lower):
             return True
         return False
+
+    def _has_sensitive_artifact(self, text: str) -> bool:
+        lower = text.lower()
+        if any(marker in lower for marker in ["/etc/passwd", "/etc/shadow", "/.ssh", ".ssh/", "id_rsa", "authorized_keys"]):
+            return True
+        if self._has_sensitive_keyword_path(lower):
+            return True
+        return False
+
+    def _has_sensitive_keyword_path(self, text: str) -> bool:
+        keyword = r"(?:tokens?|secrets?|credentials?|passwords?|shadow|api[_-]?keys?|access[_-]?keys?)"
+        return re.search(rf"(?:^|[/\\._-]){keyword}(?:$|[/\\._-])", text) is not None
 
     def _is_command_access_context(self, event: Event) -> bool:
         command_text = self._command_text(event)
@@ -363,6 +388,26 @@ class RuleEngine:
             return False
         return (sensitive and (read_marker or path_marker)) or (credential and read_marker)
 
+    def _is_high_confidence_sensitive_access(self, event: Event) -> bool:
+        if self._is_plain_session_text(event):
+            return False
+        command_text = self._command_text(event)
+        combined = f"{command_text} {event.text.lower()}"
+        if self._is_llm_api_discussion_text(combined) and not self._has_real_credential_artifact(combined):
+            return False
+        if not self._has_sensitive_artifact(combined):
+            return False
+        action = contains_any(
+            command_text,
+            self.keywords.get("read_markers", [])
+            + self.keywords.get("compression_tools", [])
+            + self.keywords.get("upload_tools", [])
+            + ["grep", "awk", "sed", "findstr", "get-content", "type"],
+        )
+        if event.source in {"audit", "session", "sysmon"} and self._is_command_access_context(event) and action:
+            return True
+        return False
+
     def _is_credential_access(self, event: Event) -> bool:
         text = event.text.lower()
         if self._is_plain_session_text(event):
@@ -373,6 +418,24 @@ class RuleEngine:
         strong_path = self._has_real_credential_artifact(text)
         read_marker = contains_any(text, self.keywords.get("read_markers", []))
         return strong_path or (credential and read_marker)
+
+    def _is_high_confidence_credential_access(self, event: Event) -> bool:
+        if self._is_plain_session_text(event):
+            return False
+        command_text = self._command_text(event)
+        combined = f"{command_text} {event.text.lower()}"
+        if self._is_llm_api_discussion_text(combined) and not self._has_real_credential_artifact(combined):
+            return False
+        if not self._has_real_credential_artifact(combined):
+            return False
+        if not self._is_command_access_context(event):
+            return False
+        return contains_any(
+            command_text,
+            self.keywords.get("read_markers", [])
+            + self.keywords.get("compression_tools", [])
+            + ["grep", "awk", "sed", "findstr", "get-content", "type", "env", "printenv", "mimikatz", "procdump"],
+        )
 
     def _is_credential_shell_access(self, event: Event) -> bool:
         if self._is_plain_session_text(event):

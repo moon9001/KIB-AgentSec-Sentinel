@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from agentsec.config import DEFAULT_RULES
+from agentsec.config import load_config
 from agentsec.llm import LLMAnalyzer
 from agentsec.models import DetectionResult, Event
+from agentsec.pipeline import apply_llm_correction
 from agentsec.rules import RuleEngine
 from agentsec.scoring import score_hits
 from agentsec.sysmon import parse_sysmon_file
@@ -185,6 +187,51 @@ def test_api_key_discussion_and_llm_paths_do_not_trigger_r109() -> None:
     assert score < SCORING["score_threshold"]
 
 
+def test_suspicious_command_rule_is_weak_without_behavior_chain() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="curl" a1="-s" a2="http://127.0.0.1:8000/v1/chat/completions"',
+            fields={"a0": "curl", "a1": "-s", "a2": "http://127.0.0.1:8000/v1/chat/completions"},
+        )
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R011" in {hit.rule_id for hit in hits}
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < SCORING["score_threshold"]
+
+
+def test_r104_does_not_trigger_on_ordinary_token_substring_package() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="tar" a1="czf" a2="/tmp/tokenizer-model.tgz" a3="/workspace/project"',
+            fields={"a0": "tar", "a1": "czf", "a2": "/tmp/tokenizer-model.tgz", "a3": "/workspace/project"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="curl" a1="-s" a2="http://127.0.0.1:8000/health"',
+            fields={"a0": "curl", "a1": "-s", "a2": "http://127.0.0.1:8000/health"},
+        ),
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R104" not in {hit.rule_id for hit in hits}
+    assert signals["strong_credential_access"] is False
+    assert label == 0
+    assert score < SCORING["score_threshold"]
+
+
 def test_shell_reading_shadow_still_triggers_r109() -> None:
     engine = RuleEngine(DEFAULT_RULES)
     events = [
@@ -272,6 +319,32 @@ def test_privilege_shell_with_network_context_is_strong_chain() -> None:
     assert score >= SCORING["score_threshold"]
 
 
+def test_profiles_split_borderline_privilege_network_chain() -> None:
+    _precision_config, precision_rules = load_config("configs/default.yaml", profile="precision")
+    _recall_config, recall_rules = load_config("configs/default.yaml", profile="recall")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="sudo" a1="bash"',
+            fields={"a0": "sudo", "a1": "bash", "comm": "sudo"},
+        )
+    ]
+    pcap = {"http_post_count": 1, "external_ip_count": 1, "tcp_flow_count": 2, "dst_ports": [443]}
+
+    precision_hits, precision_signals = RuleEngine(precision_rules).evaluate(events, pcap)
+    precision_score, precision_label, _risk = score_hits(precision_hits, _precision_config["scoring"], precision_signals)
+    recall_hits, recall_signals = RuleEngine(recall_rules).evaluate(events, pcap)
+    recall_score, recall_label, _risk = score_hits(recall_hits, _recall_config["scoring"], recall_signals)
+
+    assert "R110" in {hit.rule_id for hit in precision_hits}
+    assert precision_label == 0
+    assert precision_score < _precision_config["scoring"]["score_threshold"]
+    assert recall_label == 1
+    assert recall_score >= _recall_config["scoring"]["score_threshold"]
+
+
 def test_llm_mock_without_allowed_endpoint() -> None:
     analyzer = LLMAnalyzer(
         {
@@ -293,3 +366,31 @@ def test_llm_mock_without_allowed_endpoint() -> None:
     analysis = analyzer.analyze(detection)
     assert analysis["mode"] == "mock"
     assert analysis["suggested_label"] == 0
+
+
+def test_llm_can_correct_borderline_chain_but_not_high_confidence_chain() -> None:
+    scoring = {**SCORING, "llm_correction_min_confidence": 0.8}
+    borderline = DetectionResult(
+        md5="synthetic",
+        label=1,
+        score=60,
+        risk_level="high",
+        feature_summary={"signals": {"strong_chain": True, "terminal_rule": False, "max_chain_weight": 55, "hit_count": 3, "strong_category_count": 2}},
+        llm_analysis={"mode": "llm", "suggested_label": 0, "confidence": 0.9, "is_malicious": False},
+    )
+    apply_llm_correction(borderline, scoring, {"mode": "borderline", "min_score": 4, "max_score": 80})
+    assert borderline.label == 0
+    assert borderline.llm_changed_label is True
+
+    high_confidence = DetectionResult(
+        md5="synthetic",
+        label=1,
+        score=72,
+        risk_level="high",
+        feature_summary={"signals": {"strong_chain": True, "terminal_rule": False, "max_chain_weight": 60, "hit_count": 3, "strong_category_count": 2}},
+        llm_analysis={"mode": "llm", "suggested_label": 0, "confidence": 0.9, "is_malicious": False},
+    )
+    apply_llm_correction(high_confidence, scoring, {"mode": "borderline", "min_score": 4, "max_score": 80})
+    assert high_confidence.label == 1
+    assert high_confidence.llm_changed_label is False
+    assert high_confidence.llm_analysis["label_correction"] == "skipped_strong_rule"

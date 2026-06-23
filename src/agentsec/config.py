@@ -20,6 +20,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "weak_signal_score_cap": 34,
         "require_chain_for_label1": True,
         "min_strong_categories_for_label1": 2,
+        "terminal_rule_ids": ["R005"],
         "llm_min_score": 35,
         "llm_correction_min_confidence": 0.7,
         "default_label_on_error": 0,
@@ -185,6 +186,12 @@ DEFAULT_RULES: dict[str, Any] = {
         "benign_llm_user_agents": ["openai", "python-requests"],
     },
     "network": {"require_http_details_for_post": True},
+    "profile_behavior": {
+        "credential_shell_requires_same_event": True,
+        "credential_exfil_requires_command": True,
+        "sensitive_chain_requires_command": True,
+        "include_network_observed_as_strong_category": False,
+    },
 }
 
 
@@ -226,6 +233,8 @@ def load_config(config_path: str | Path | None, profile: str | None = None) -> t
     if profile:
         config = deep_merge(config, load_yaml(profile_file))
     config["profile"] = selected_profile
+    config["profile_config_source"] = str(profile_file) if profile_file.exists() else "defaults"
+    config["config_path"] = str(config_file) if config_file else ""
 
     rules_file = Path(str(config.get("rules_file", "rules/default_rules.yaml")))
     if not rules_file.is_absolute():

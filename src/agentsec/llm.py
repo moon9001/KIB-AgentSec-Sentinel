@@ -48,10 +48,11 @@ class LLMAnalyzer:
         signals = (result.feature_summary or {}).get("signals", {})
         if signals.get("terminal_rule"):
             return "terminal rule; LLM cannot lower high-confidence detection"
-        if signals.get("strong_chain") and result.risk_level in {"high", "critical"}:
+        threshold = float(self.config.get("score_threshold", 60))
+        max_chain_weight = float(signals.get("max_chain_weight") or 0)
+        if signals.get("strong_chain") and max_chain_weight >= threshold:
             return "strong high-confidence behavior chain"
         min_score = float(self.config.get("llm_min_score", self.config.get("min_score", 35)))
-        threshold = float(self.config.get("score_threshold", 60))
         window = float(self.config.get("borderline_window", 12))
         if result.risk_level == "medium" or (result.score >= min_score and abs(result.score - threshold) <= window):
             return None

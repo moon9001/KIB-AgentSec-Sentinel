@@ -211,7 +211,9 @@ def apply_llm_correction(result: DetectionResult, scoring_config: dict[str, Any]
         result.llm_changed_label = False
         return
     signals = (result.feature_summary or {}).get("signals", {})
-    if signals.get("terminal_rule") or (signals.get("strong_chain") and result.risk_level in {"high", "critical"}):
+    score_threshold = float(scoring_config.get("score_threshold", scoring_config.get("label_threshold", 60)))
+    max_chain_weight = float(signals.get("max_chain_weight") or 0)
+    if signals.get("terminal_rule") or max_chain_weight >= score_threshold:
         analysis["label_correction"] = "skipped_strong_rule"
         result.label_after_llm = result.label
         result.llm_changed_label = False
@@ -229,11 +231,11 @@ def apply_llm_correction(result: DetectionResult, scoring_config: dict[str, Any]
         result.llm_changed_label = False
         return
     min_score = float(llm_config.get("min_score", scoring_config.get("llm_min_score", 4)))
-    max_score = float(llm_config.get("max_score", scoring_config.get("score_threshold", 60)))
+    max_score = float(llm_config.get("max_score", score_threshold))
     weak_context = int(signals.get("hit_count") or 0) >= 2 or int(signals.get("strong_category_count") or 0) >= 2
     boundary_score = min_score <= float(result.score) <= max_score
     can_upgrade = result.label == 0 and suggested_label == 1 and weak_context and boundary_score
-    can_downgrade = result.label == 1 and suggested_label == 0 and not signals.get("strong_chain") and not signals.get("terminal_rule")
+    can_downgrade = result.label == 1 and suggested_label == 0 and not signals.get("terminal_rule") and max_chain_weight < score_threshold
     if not (can_upgrade or can_downgrade):
         analysis["label_correction"] = "skipped_fusion_guard"
         result.label_after_llm = result.label
@@ -287,6 +289,10 @@ def summarize_run(
         "label_distribution": {str(key): value for key, value in sorted(label_counts.items())},
         "profile": str((config or {}).get("profile", "balanced")),
         "config_path": str(config_path) if config_path else "",
+        "profile_config_source": str((config or {}).get("profile_config_source", "")),
+        "score_threshold": (config or {}).get("scoring", {}).get("score_threshold"),
+        "strong_chain_threshold": (config or {}).get("scoring", {}).get("strong_chain_threshold"),
+        "profile_behavior": (config or {}).get("rules", {}).get("profile_behavior", {}),
         "llm_mode": llm_mode,
         "output": str(output),
         "detail_output": str(detail_output),
