@@ -22,7 +22,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--detail-output", required=True, help="Path to detail.jsonl explanations.")
     parser.add_argument("--workdir", required=True, help="Temporary extraction workspace.")
     parser.add_argument("--config", default=str(ROOT / "configs" / "default.yaml"), help="YAML configuration path.")
+    parser.add_argument("--profile", choices=["balanced", "recall", "precision"], default=None, help="Detection strategy profile. Overrides config file profile.")
     parser.add_argument("--use-llm", action="store_true", help="Enable optional OpenAI-compatible LLM attribution.")
+    parser.add_argument("--llm-mode", choices=["off", "borderline", "all", "explain-only"], default=None, help="LLM selection/fusion mode.")
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N sorted samples.")
     return parser.parse_args()
 
@@ -35,7 +37,9 @@ def main() -> int:
         detail_output_path=args.detail_output,
         workdir=args.workdir,
         config_path=args.config,
+        profile=args.profile,
         use_llm=args.use_llm,
+        llm_mode=args.llm_mode,
         limit=args.limit,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -44,4 +48,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

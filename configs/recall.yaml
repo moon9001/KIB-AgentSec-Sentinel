@@ -1,0 +1,59 @@
+profile: recall
+rules_file: rules/default_rules.yaml
+
+scoring:
+  score_threshold: 58
+  label_threshold: 58
+  strong_chain_threshold: 52
+  weak_signal_score_cap: 34
+  require_chain_for_label1: true
+  min_strong_categories_for_label1: 2
+  llm_min_score: 4
+  llm_correction_min_confidence: 0.8
+  risk_levels:
+    low: 10
+    medium: 32
+    high: 58
+    critical: 80
+
+rules:
+  weights:
+    combo_sensitive_upload: 58
+    combo_sensitive_network_post: 58
+    combo_cleanup_plus_sensitive: 56
+    combo_privilege_followup: 56
+    combo_credential_shell: 60
+    combo_privilege_shell_network_context: 56
+    combo_powershell_network: 58
+    combo_persistence_command: 58
+    combo_lateral_credential: 65
+
+llm:
+  enabled: false
+  mode: borderline
+  base_url: http://127.0.0.1:8000/v1
+  model: qwen36-27b
+  timeout: 180
+  timeout_seconds: 180
+  min_score: 4
+  max_score: 80
+  max_cases: 0
+  cache: true
+  cache_path: data/work/llm_cache.jsonl
+  borderline_window: 14
+  max_evidence: 8
+  allow_external_api: false
+
+pcap_enabled: true
+pcap_max_packets: 50000
+evidence_excerpt_max_chars: 240
+default_label_on_error: 0
+
+pcap:
+  enabled: true
+  max_packets: 50000
+
+output:
+  evidence_excerpt_chars: 240
+  evidence_excerpt_max_chars: 240
+

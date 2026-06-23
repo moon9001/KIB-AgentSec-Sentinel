@@ -32,6 +32,10 @@ class RuleEngine:
         network_observed = self._is_network_observed(pcap_features)
         shell_events = self._matching_events(events, self._is_shell_or_cmd_event)
         copy_events = self._matching_events(events, self._is_copy_action)
+        suspicious_command_events = self._matching_events(events, self._is_suspicious_command)
+        suspicious_powershell_events = self._matching_events(events, self._is_suspicious_powershell)
+        persistence_events = self._matching_events(events, self._is_persistence_action)
+        lateral_events = self._matching_events(events, self._is_lateral_movement)
 
         self._add_if(hits, "R001", "Sensitive file or directory access", "file", "low", "sensitive_file_access", sensitive_events)
         self._add_if(hits, "R002", "Credential material access", "credential", "medium", "credential_access", credential_events)
@@ -41,6 +45,10 @@ class RuleEngine:
         self._add_if(hits, "R006", "Privilege escalation or permission change", "privilege", "medium", "privilege_escalation", privilege_events)
         self._add_if(hits, "R007", "Trace cleanup or session deletion", "cleanup", "medium", "trace_cleanup", cleanup_events)
         self._add_if(hits, "R008", "Agent shell/tool action with risky context", "agent", "medium", "agent_tool_abuse", agent_tool_events)
+        self._add_if(hits, "R011", "Suspicious command interpreter or living-off-the-land tool", "command", "low", "suspicious_command", suspicious_command_events)
+        self._add_if(hits, "R012", "Suspicious PowerShell command", "powershell", "medium", "suspicious_powershell", suspicious_powershell_events)
+        self._add_if(hits, "R013", "Persistence mechanism marker", "persistence", "medium", "persistence", persistence_events)
+        self._add_if(hits, "R014", "Lateral movement marker", "lateral", "medium", "lateral_movement", lateral_events)
 
         if suspicious_network:
             hits.append(
@@ -134,6 +142,40 @@ class RuleEngine:
                     pcap_features,
                 )
             )
+        if suspicious_powershell_events and (network_events or network_post):
+            hits.append(
+                self._combo_hit(
+                    "R111",
+                    "Suspicious PowerShell with network transfer",
+                    "combo",
+                    "chain",
+                    "combo_powershell_network",
+                    [suspicious_powershell_events[0], (network_events or [None])[0]],
+                    pcap_features if network_post else None,
+                )
+            )
+        if persistence_events and suspicious_command_events:
+            hits.append(
+                self._combo_hit(
+                    "R112",
+                    "Persistence mechanism created by suspicious command",
+                    "combo",
+                    "chain",
+                    "combo_persistence_command",
+                    [persistence_events[0], suspicious_command_events[0]],
+                )
+            )
+        if lateral_events and credential_events:
+            hits.append(
+                self._combo_hit(
+                    "R113",
+                    "Lateral movement combined with credential access",
+                    "combo",
+                    "chain",
+                    "combo_lateral_credential",
+                    [lateral_events[0], credential_events[0]],
+                )
+            )
         if credential_events and (copy_events or compression_events or network_events or network_post):
             hits.append(
                 self._combo_hit(
@@ -184,6 +226,10 @@ class RuleEngine:
                     "cleanup": bool(cleanup_events),
                     "destructive": bool(destructive_events),
                     "agent": bool(agent_tool_events or shell_events or credential_shell_events),
+                    "powershell": bool(suspicious_powershell_events),
+                    "persistence": bool(persistence_events),
+                    "lateral": bool(lateral_events),
+                    "command": bool(suspicious_command_events),
                 }.items()
                 if active
             }
@@ -203,6 +249,10 @@ class RuleEngine:
             "shell_or_cmd": bool(shell_events or credential_shell_events),
             "credential_shell_access": bool(credential_shell_events),
             "copy_or_download": bool(copy_events),
+            "suspicious_command": bool(suspicious_command_events),
+            "suspicious_powershell": bool(suspicious_powershell_events),
+            "persistence": bool(persistence_events),
+            "lateral_movement": bool(lateral_events),
             "suspicious_pcap": bool(suspicious_network),
             "strong_chain": bool(strong_chain_rules),
             "terminal_rule": bool(any(hit.severity == "terminal" for hit in hits)),
@@ -238,6 +288,15 @@ class RuleEngine:
             fields.get("a1"),
             fields.get("a2"),
             fields.get("a3"),
+            fields.get("image"),
+            fields.get("command_line"),
+            fields.get("parent_image"),
+            fields.get("parent_command_line"),
+            fields.get("target_filename"),
+            fields.get("current_directory"),
+            fields.get("query_name"),
+            fields.get("destination_ip"),
+            fields.get("destination_port"),
         ]
         return " ".join(str(value) for value in values if value not in (None, "")).lower()
 
@@ -266,6 +325,8 @@ class RuleEngine:
         lower = text.lower()
         if any(marker in lower for marker in ["/etc/shadow", "id_rsa", "authorized_keys", "private key"]):
             return True
+        if any(marker.lower() in lower for marker in self.keywords.get("windows_credential_artifacts", [])):
+            return True
         if re.search(r"[/\\][^\s\"']*(token|secret|credential|password|shadow|api[_-]?key)[^\s\"']*", lower):
             return True
         if re.search(r"\b(env|printenv)\b", lower) and re.search(r"\b(token|secret|credential|password|api[_-]?key|access[_-]?key)\b", lower):
@@ -277,7 +338,11 @@ class RuleEngine:
         if event.source == "audit" and event.event_type in {"execve", "proctitle", "syscall"}:
             return bool(command_text)
         if event.source == "session":
-            return contains_any(command_text, ["cmd_run", "shell", "bash", "sh", "read_file", "cat", "grep", "cp", "tar"])
+            return contains_any(command_text, ["cmd_run", "shell", "bash", "sh", "cat", "grep", "cp", "tar"])
+        if event.source == "sysmon":
+            return event.event_type in {"1", "process_create", "process creation", "sysmon"} or bool(
+                event.fields.get("command_line") or event.fields.get("image")
+            )
         return False
 
     def _is_sensitive_access(self, event: Event) -> bool:
@@ -305,7 +370,7 @@ class RuleEngine:
         if self._is_llm_api_discussion_text(text) and not self._has_real_credential_artifact(text):
             return False
         credential = contains_any(text, self.keywords.get("credential_keywords", []))
-        strong_path = any(marker in text for marker in ["id_rsa", "/etc/shadow", "authorized_keys", "private key"])
+        strong_path = self._has_real_credential_artifact(text)
         read_marker = contains_any(text, self.keywords.get("read_markers", []))
         return strong_path or (credential and read_marker)
 
@@ -320,7 +385,27 @@ class RuleEngine:
             return False
         access_action = contains_any(
             command_text,
-            ["cat", "grep", "cp", "tar", "zip", "read_file", "download", "env", "printenv", "awk", "sed"],
+            [
+                "cat",
+                "grep",
+                "cp",
+                "copy",
+                "tar",
+                "zip",
+                "read_file",
+                "download",
+                "env",
+                "printenv",
+                "awk",
+                "sed",
+                "type",
+                "findstr",
+                "get-content",
+                "reg save",
+                "procdump",
+                "mimikatz",
+                "certutil",
+            ],
         )
         if not access_action:
             return False
@@ -336,6 +421,11 @@ class RuleEngine:
         command_text = self._command_text(event)
         if event.source == "audit" and event.event_type not in {"execve", "proctitle", "syscall"}:
             return False
+        if event.source == "sysmon" and event.event_type in {"3", "network", "network_connection"}:
+            return contains_any(
+                command_text,
+                self.keywords.get("upload_tools", []) + ["powershell", "pwsh", "certutil", "bitsadmin", "curl", "wget"],
+            )
         return contains_any(command_text, self.keywords.get("upload_tools", []))
 
     def _is_destructive_action(self, event: Event) -> bool:
@@ -348,7 +438,7 @@ class RuleEngine:
 
     def _is_copy_action(self, event: Event) -> bool:
         command_text = self._command_text(event)
-        return contains_any(command_text, ["copy", "cp", "download", "write_file"])
+        return contains_any(command_text, ["copy", "cp", "download", "write_file", "xcopy", "robocopy", "reg save"])
 
     def _is_shell_or_cmd_event(self, event: Event) -> bool:
         command_text = self._command_text(event)
@@ -356,7 +446,35 @@ class RuleEngine:
             return contains_any(command_text, self.keywords.get("shell_tools", []))
         if event.source == "audit" and event.event_type in {"execve", "proctitle", "syscall"}:
             return contains_any(command_text, ["bash", "sh", "zsh", "python", "perl"])
+        if event.source == "sysmon":
+            return contains_any(command_text, self.keywords.get("shell_tools", []) + ["cmd.exe", "powershell", "pwsh"])
         return False
+
+    def _is_suspicious_command(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if not command_text:
+            return False
+        if event.source == "session" and event.event_type in {"message", "session", "model_change", "thinking_level_change", "custom"}:
+            return False
+        return contains_any(command_text, self.keywords.get("suspicious_commands", []))
+
+    def _is_suspicious_powershell(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if not contains_any(command_text, ["powershell", "pwsh"]):
+            return False
+        return contains_any(command_text, self.keywords.get("suspicious_powershell_markers", []))
+
+    def _is_persistence_action(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if event.source == "session" and event.event_type in {"message", "session", "model_change", "thinking_level_change", "custom"}:
+            return False
+        return contains_any(command_text, self.keywords.get("persistence_markers", []))
+
+    def _is_lateral_movement(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if event.source == "session" and event.event_type in {"message", "session", "model_change", "thinking_level_change", "custom"}:
+            return False
+        return contains_any(command_text, self.keywords.get("lateral_movement_markers", []))
 
     def _is_agent_tool_abuse(self, event: Event) -> bool:
         if event.source != "session":

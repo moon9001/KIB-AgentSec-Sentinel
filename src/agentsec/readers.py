@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import Event
+from .sysmon import find_sysmon_artifacts, parse_sysmon_file
 from .utils import compact_json, first_present, flatten_value, redact_text
 
 
@@ -106,6 +107,11 @@ def parse_extracted_sample(md5: str, root: Path) -> ParsedSample:
 
     if "pcap" not in artifacts:
         parsed.warnings.append("missing network.pcap")
+
+    for sysmon_path in find_sysmon_artifacts(root):
+        events, warnings = parse_sysmon_file(md5, sysmon_path)
+        parsed.events.extend(events)
+        parsed.warnings.extend(warnings)
 
     return parsed
 
@@ -248,4 +254,3 @@ def audit_event_text(fields: dict[str, Any]) -> str:
     if not text_parts:
         text_parts = [f"{key}={value}" for key, value in fields.items()]
     return redact_text(" ".join(text_parts), 1200)
-

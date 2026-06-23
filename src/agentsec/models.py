@@ -61,6 +61,14 @@ class DetectionResult:
     label: int
     score: float
     risk_level: str
+    profile: str = "balanced"
+    score_threshold: float | None = None
+    strong_chain_threshold: float | None = None
+    llm_mode: str = "off"
+    label_before_llm: int | None = None
+    label_after_llm: int | None = None
+    llm_changed_label: bool = False
+    llm_decision: dict[str, Any] | None = None
     matched_rules: list[RuleHit] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
     behavior_chains: list[dict[str, Any]] = field(default_factory=list)
@@ -71,4 +79,3 @@ class DetectionResult:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-

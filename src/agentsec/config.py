@@ -5,8 +5,12 @@ from typing import Any
 
 from .utils import deep_merge
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+VALID_PROFILES = {"balanced", "recall", "precision"}
+
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "profile": "balanced",
     "rules_file": "rules/default_rules.yaml",
     "scoring": {
         "score_threshold": 60,
@@ -24,13 +28,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "llm": {
         "enabled": False,
+        "mode": "borderline",
         "base_url": "http://127.0.0.1:8000/v1",
         "model": "qwen36-27b",
-        "timeout_seconds": 8,
-        "llm_min_score": 35,
-        "min_score": 35,
+        "timeout": 180,
+        "timeout_seconds": 180,
+        "llm_min_score": 4,
+        "min_score": 4,
+        "max_score": 80,
+        "max_cases": 0,
         "borderline_window": 12,
         "max_evidence": 8,
+        "cache": True,
+        "cache_path": "data/work/llm_cache.jsonl",
         "allow_external_api": False,
     },
     "pcap_enabled": True,
@@ -69,11 +79,30 @@ DEFAULT_RULES: dict[str, Any] = {
         "combo_credential_shell": 60,
         "combo_privilege_shell_network_context": 55,
         "correlated_agent_audit_network": 55,
+        "combo_powershell_network": 58,
+        "combo_persistence_command": 58,
+        "combo_lateral_credential": 65,
+        "suspicious_powershell": 8,
+        "persistence": 8,
+        "lateral_movement": 10,
+        "suspicious_command": 4,
     },
     "keywords": {
         "sensitive_paths": ["/etc/passwd", "/etc/shadow", "/.ssh", ".ssh/", "id_rsa", "authorized_keys"],
-        "credential_keywords": ["token", "secret", "credential", "passwd", "shadow", "id_rsa", "api_key"],
-        "read_markers": ["read_file", "cat", "open", "copy", "cp", "download"],
+        "credential_keywords": [
+            "token",
+            "secret",
+            "credential",
+            "passwd",
+            "shadow",
+            "id_rsa",
+            "api_key",
+            "lsass",
+            "ntds.dit",
+            "mimikatz",
+            "sam",
+        ],
+        "read_markers": ["read_file", "cat", "open", "copy", "cp", "download", "type", "findstr", "get-content", "reg save", "procdump"],
         "compression_tools": ["tar", "zip", "gzip", "7z", "rar"],
         "upload_tools": ["curl", "wget", "scp", "ftp", "sftp", "rsync", "upload", "post"],
         "privilege_tools": ["sudo", "su", "chmod 777", "chown", "setuid", "useradd", "passwd"],
@@ -81,6 +110,75 @@ DEFAULT_RULES: dict[str, Any] = {
         "trace_cleanup_commands": ["history -c", "truncate", "rm audit.log", "sessions.remove", "clear log"],
         "suspicious_agent_tools": ["openclaw", "gateway", "file_home", "cmd_run", "shell", "network", "upload", "read_file"],
         "shell_tools": ["cmd_run", "shell", "bash", "sh"],
+        "suspicious_commands": [
+            "powershell",
+            "pwsh",
+            "cmd.exe",
+            "cmd ",
+            "wscript",
+            "cscript",
+            "rundll32",
+            "regsvr32",
+            "mshta",
+            "wmic",
+            "schtasks",
+            "bitsadmin",
+            "certutil",
+            "curl",
+            "wget",
+            "scp",
+            "ftp",
+            "sftp",
+            "python",
+            "node",
+        ],
+        "suspicious_powershell_markers": [
+            "encodedcommand",
+            "-enc",
+            "downloadstring",
+            "invoke-webrequest",
+            "invoke-restmethod",
+            "iex",
+            "bypass",
+            "hidden",
+            "noprofile",
+        ],
+        "persistence_markers": [
+            "runonce",
+            "\\run",
+            "startup",
+            "schtasks",
+            "sc create",
+            "new-service",
+            "service create",
+        ],
+        "lateral_movement_markers": [
+            "psexec",
+            "wmic process call create",
+            "winrm",
+            "enter-pssession",
+            "invoke-command",
+            "mstsc",
+            "admin$",
+            "c$",
+            "ipc$",
+            "\\\\",
+        ],
+        "windows_credential_artifacts": [
+            "lsass",
+            "ntds.dit",
+            "\\windows\\system32\\config\\sam",
+            "\\windows\\system32\\config\\system",
+            "\\windows\\system32\\config\\security",
+            "hklm\\sam",
+            "hklm\\system",
+            "hklm\\security",
+            "mimikatz",
+            "procdump",
+            "login data",
+            "cookies",
+            "web data",
+        ],
         "suspicious_domains": ["paste", "transfer", "webhook", "ngrok", "requestbin"],
         "benign_llm_hosts": ["llm", "localhost", "127.0.0.1", "openai"],
         "benign_llm_paths": ["/v1/chat/completions", "/v1/completions", "/v1/responses", "/health"],
@@ -105,17 +203,39 @@ def load_yaml(path: str | Path | None) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
-def load_config(config_path: str | Path | None) -> tuple[dict[str, Any], dict[str, Any]]:
+def normalize_profile(profile: str | None) -> str:
+    value = (profile or "").strip().lower()
+    if not value:
+        return "balanced"
+    if value not in VALID_PROFILES:
+        raise ValueError(f"Unknown profile '{profile}'. Expected one of: {', '.join(sorted(VALID_PROFILES))}")
+    return value
+
+
+def profile_config_path(profile: str) -> Path:
+    return PROJECT_ROOT / "configs" / f"{profile}.yaml"
+
+
+def load_config(config_path: str | Path | None, profile: str | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
     config_file = Path(config_path) if config_path else None
-    config = deep_merge(DEFAULT_CONFIG, load_yaml(config_file))
+    file_config = load_yaml(config_file)
+    selected_profile = normalize_profile(profile or str(file_config.get("profile", DEFAULT_CONFIG.get("profile", "balanced"))))
+    profile_file = profile_config_path(selected_profile)
+    config = deep_merge(DEFAULT_CONFIG, load_yaml(profile_file))
+    config = deep_merge(config, file_config)
+    if profile:
+        config = deep_merge(config, load_yaml(profile_file))
+    config["profile"] = selected_profile
 
     rules_file = Path(str(config.get("rules_file", "rules/default_rules.yaml")))
     if not rules_file.is_absolute():
-        base = config_file.parent if config_file else Path.cwd()
+        base = config_file.parent if config_file else PROJECT_ROOT
         candidate = base / rules_file
         if not candidate.exists():
-            candidate = Path.cwd() / rules_file
+            candidate = PROJECT_ROOT / rules_file
         rules_file = candidate
 
     rules = deep_merge(DEFAULT_RULES, load_yaml(rules_file))
+    rules = deep_merge(rules, config.get("rule_overrides", {}))
+    rules = deep_merge(rules, config.get("rules", {}))
     return config, rules

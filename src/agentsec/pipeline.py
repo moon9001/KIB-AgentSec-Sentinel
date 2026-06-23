@@ -23,10 +23,12 @@ def run_pipeline(
     detail_output_path: str | Path,
     workdir: str | Path,
     config_path: str | Path | None = None,
+    profile: str | None = None,
     use_llm: bool = False,
+    llm_mode: str | None = None,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    config, rules_config = load_config(config_path)
+    config, rules_config = load_config(config_path, profile=profile)
     sample_zips = discover_sample_zips(input_path)
     if limit is not None:
         sample_zips = sample_zips[:limit]
@@ -40,21 +42,26 @@ def run_pipeline(
 
     rule_engine = RuleEngine(rules_config, config.get("output", {}))
     llm_config = dict(config.get("llm", {}))
-    llm_config["enabled"] = bool(use_llm or llm_config.get("enabled", False))
+    selected_llm_mode = (llm_mode or llm_config.get("mode") or "borderline").strip().lower()
+    if selected_llm_mode not in {"off", "borderline", "all", "explain-only"}:
+        raise ValueError("--llm-mode must be one of: off, borderline, all, explain-only")
+    llm_config["mode"] = selected_llm_mode
+    llm_config["enabled"] = bool((use_llm or llm_config.get("enabled", False)) and selected_llm_mode != "off")
     llm_config.setdefault("score_threshold", config.get("scoring", {}).get("score_threshold", config.get("scoring", {}).get("label_threshold", 60)))
     llm_config.setdefault("llm_min_score", config.get("scoring", {}).get("llm_min_score", llm_config.get("min_score", 35)))
     llm = LLMAnalyzer(llm_config)
+    runtime_llm_mode = selected_llm_mode if llm_config["enabled"] else "off"
 
     results: list[DetectionResult] = []
     for zip_path in sample_zips:
-        results.append(process_sample(zip_path, work, config, rule_engine, llm if llm_config["enabled"] else None))
+        results.append(process_sample(zip_path, work, config, rule_engine, llm if llm_config["enabled"] else None, runtime_llm_mode))
 
     expected_md5s = [zip_path.stem for zip_path in sample_zips]
     results = ensure_complete_results(expected_md5s, results, config)
 
     write_result_csv(output, results)
     write_detail_jsonl(detail_output, results)
-    return summarize_run(results, output, detail_output, expected_md5s)
+    return summarize_run(results, output, detail_output, expected_md5s, config, config_path, runtime_llm_mode)
 
 
 def process_sample(
@@ -63,6 +70,7 @@ def process_sample(
     config: dict[str, Any],
     rule_engine: RuleEngine,
     llm: LLMAnalyzer | None = None,
+    llm_mode: str = "off",
 ) -> DetectionResult:
     md5 = zip_path.stem
     warnings: list[str] = []
@@ -100,6 +108,13 @@ def process_sample(
                 label=label,
                 score=score,
                 risk_level=risk,
+                profile=str(config.get("profile", "balanced")),
+                score_threshold=float(config.get("scoring", {}).get("score_threshold", config.get("scoring", {}).get("label_threshold", 60))),
+                strong_chain_threshold=float(config.get("scoring", {}).get("strong_chain_threshold", 55)),
+                llm_mode=llm_mode if llm else "off",
+                label_before_llm=label,
+                label_after_llm=label,
+                llm_changed_label=False,
                 matched_rules=hits,
                 evidence=evidence,
                 behavior_chains=chains,
@@ -109,7 +124,8 @@ def process_sample(
             )
             if llm and llm.should_call(result):
                 result.llm_analysis = llm.analyze(result)
-                apply_llm_correction(result, config.get("scoring", {}))
+                apply_llm_correction(result, config.get("scoring", {}), llm.config)
+                result.llm_decision = result.llm_analysis
             elif llm:
                 result.llm_analysis = {
                     "mode": "skipped",
@@ -117,6 +133,7 @@ def process_sample(
                     "is_malicious": bool(label),
                     "risk_level": risk,
                 }
+                result.llm_decision = result.llm_analysis
             return result
     except Exception as exc:
         warning = f"sample processing failed: {type(exc).__name__}: {exc}"
@@ -126,6 +143,13 @@ def process_sample(
             label=default_label,
             score=0,
             risk_level="none",
+            profile=str(config.get("profile", "balanced")),
+            score_threshold=float(config.get("scoring", {}).get("score_threshold", config.get("scoring", {}).get("label_threshold", 60))),
+            strong_chain_threshold=float(config.get("scoring", {}).get("strong_chain_threshold", 55)),
+            llm_mode=llm_mode if llm else "off",
+            label_before_llm=default_label,
+            label_after_llm=default_label,
+            llm_changed_label=False,
             matched_rules=[],
             evidence=[Evidence(source="pipeline", rule_id="ERROR", message="sample failed", excerpt=warning)],
             behavior_chains=[],
@@ -153,6 +177,13 @@ def ensure_complete_results(expected_md5s: list[str], results: list[DetectionRes
                 label=default_label,
                 score=0,
                 risk_level="none",
+                profile=str(config.get("profile", "balanced")),
+                score_threshold=float(config.get("scoring", {}).get("score_threshold", config.get("scoring", {}).get("label_threshold", 60))),
+                strong_chain_threshold=float(config.get("scoring", {}).get("strong_chain_threshold", 55)),
+                llm_mode=str(config.get("llm", {}).get("mode", "off")),
+                label_before_llm=default_label,
+                label_after_llm=default_label,
+                llm_changed_label=False,
                 matched_rules=[],
                 evidence=[Evidence(source="pipeline", rule_id="MISSING_OUTPUT", message="missing output", excerpt=warning)],
                 behavior_chains=[],
@@ -166,25 +197,52 @@ def ensure_complete_results(expected_md5s: list[str], results: list[DetectionRes
     return completed
 
 
-def apply_llm_correction(result: DetectionResult, scoring_config: dict[str, Any]) -> None:
+def apply_llm_correction(result: DetectionResult, scoring_config: dict[str, Any], llm_config: dict[str, Any] | None = None) -> None:
+    llm_config = llm_config or {}
     analysis = result.llm_analysis or {}
     if analysis.get("mode") != "llm":
+        result.label_after_llm = result.label
+        result.llm_changed_label = False
+        return
+    result.label_before_llm = result.label
+    if llm_config.get("mode") == "explain-only":
+        analysis["label_correction"] = "skipped_explain_only"
+        result.label_after_llm = result.label
+        result.llm_changed_label = False
         return
     signals = (result.feature_summary or {}).get("signals", {})
     if signals.get("terminal_rule") or (signals.get("strong_chain") and result.risk_level in {"high", "critical"}):
         analysis["label_correction"] = "skipped_strong_rule"
-        return
-    if result.risk_level != "medium":
-        analysis["label_correction"] = "skipped_non_medium"
+        result.label_after_llm = result.label
+        result.llm_changed_label = False
         return
     confidence = float(analysis.get("confidence") or 0)
-    is_malicious = bool(analysis.get("is_malicious"))
-    min_confidence = float(scoring_config.get("llm_correction_min_confidence", 0.7))
+    suggested = analysis.get("suggested_label")
+    if str(suggested) in {"0", "1"}:
+        suggested_label = int(str(suggested))
+    else:
+        suggested_label = 1 if bool(analysis.get("is_malicious")) else 0
+    min_confidence = float(scoring_config.get("llm_correction_min_confidence", 0.8))
     if confidence < min_confidence:
         analysis["label_correction"] = "skipped_low_confidence"
+        result.label_after_llm = result.label
+        result.llm_changed_label = False
+        return
+    min_score = float(llm_config.get("min_score", scoring_config.get("llm_min_score", 4)))
+    max_score = float(llm_config.get("max_score", scoring_config.get("score_threshold", 60)))
+    weak_context = int(signals.get("hit_count") or 0) >= 2 or int(signals.get("strong_category_count") or 0) >= 2
+    boundary_score = min_score <= float(result.score) <= max_score
+    can_upgrade = result.label == 0 and suggested_label == 1 and weak_context and boundary_score
+    can_downgrade = result.label == 1 and suggested_label == 0 and not signals.get("strong_chain") and not signals.get("terminal_rule")
+    if not (can_upgrade or can_downgrade):
+        analysis["label_correction"] = "skipped_fusion_guard"
+        result.label_after_llm = result.label
+        result.llm_changed_label = False
         return
     old_label = result.label
-    result.label = 1 if is_malicious else 0
+    result.label = suggested_label
+    result.label_after_llm = result.label
+    result.llm_changed_label = old_label != result.label
     analysis["label_correction"] = f"{old_label}->{result.label}"
     result.summary = f"{result.summary}; llm_medium_correction={old_label}->{result.label}"
 
@@ -203,7 +261,15 @@ def write_detail_jsonl(path: Path, results: list[DetectionResult]) -> None:
             handle.write(json.dumps(result.to_dict(), ensure_ascii=False, default=str) + "\n")
 
 
-def summarize_run(results: list[DetectionResult], output: Path, detail_output: Path, expected_md5s: list[str] | None = None) -> dict[str, Any]:
+def summarize_run(
+    results: list[DetectionResult],
+    output: Path,
+    detail_output: Path,
+    expected_md5s: list[str] | None = None,
+    config: dict[str, Any] | None = None,
+    config_path: str | Path | None = None,
+    llm_mode: str = "off",
+) -> dict[str, Any]:
     label_counts = Counter(result.label for result in results)
     rule_counts: Counter[str] = Counter()
     for result in results:
@@ -219,6 +285,9 @@ def summarize_run(results: list[DetectionResult], output: Path, detail_output: P
         "missing_output_count": len(missing_output),
         "missing_output_md5": missing_output[:20],
         "label_distribution": {str(key): value for key, value in sorted(label_counts.items())},
+        "profile": str((config or {}).get("profile", "balanced")),
+        "config_path": str(config_path) if config_path else "",
+        "llm_mode": llm_mode,
         "output": str(output),
         "detail_output": str(detail_output),
         "top_rules": rule_counts.most_common(20),

@@ -1,0 +1,59 @@
+profile: balanced
+rules_file: rules/default_rules.yaml
+
+scoring:
+  score_threshold: 60
+  label_threshold: 60
+  strong_chain_threshold: 55
+  weak_keyword_weight: 1
+  weak_signal_score_cap: 34
+  require_chain_for_label1: true
+  min_strong_categories_for_label1: 2
+  llm_min_score: 4
+  llm_correction_min_confidence: 0.8
+  default_label_on_error: 0
+  max_score: 100
+  risk_levels:
+    low: 10
+    medium: 35
+    high: 60
+    critical: 80
+
+llm:
+  enabled: false
+  mode: borderline
+  base_url: http://127.0.0.1:8000/v1
+  model: qwen36-27b
+  timeout: 180
+  timeout_seconds: 180
+  min_score: 4
+  max_score: 80
+  max_cases: 0
+  cache: true
+  cache_path: data/work/llm_cache.jsonl
+  borderline_window: 12
+  max_evidence: 8
+  allow_external_api: false
+
+pcap_enabled: true
+pcap_max_packets: 50000
+evidence_excerpt_max_chars: 240
+default_label_on_error: 0
+
+pcap:
+  enabled: true
+  max_packets: 50000
+  suspicious_external_threshold: 1
+  suspicious_connection_threshold: 200
+  suspicious_nonstandard_ports:
+    - 4444
+    - 5555
+    - 6667
+    - 8081
+    - 9001
+    - 1337
+
+output:
+  evidence_excerpt_chars: 240
+  evidence_excerpt_max_chars: 240
+

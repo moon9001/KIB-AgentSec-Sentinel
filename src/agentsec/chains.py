@@ -105,6 +105,39 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
+    if "R111" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:powershell-network",
+                "title": "Suspicious PowerShell with network transfer",
+                "risk": "high",
+                "steps": ["suspicious_powershell", "network_transfer"],
+                "supporting_rules": sorted(set(hit_by_category.get("powershell", []) + hit_by_category.get("network", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R112" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:persistence-command",
+                "title": "Persistence mechanism created by suspicious command",
+                "risk": "high",
+                "steps": ["persistence", "suspicious_command"],
+                "supporting_rules": sorted(set(hit_by_category.get("persistence", []) + hit_by_category.get("command", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R113" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:lateral-credential",
+                "title": "Lateral movement combined with credential access",
+                "risk": "critical",
+                "steps": ["lateral_movement", "credential_access"],
+                "supporting_rules": sorted(set(hit_by_category.get("lateral", []) + hit_by_category.get("credential", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
     if not chains and hits:
         chains.append(
             {

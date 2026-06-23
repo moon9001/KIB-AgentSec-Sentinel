@@ -1,6 +1,6 @@
 # KIB-AgentSec Sentinel
 
-Offline baseline detector for AI agent malicious operation behavior. The tool reads sample zip files, extracts `session.jsonl`, `audit.log`, and `network.pcap`, applies configurable rules and scoring, and writes:
+Offline baseline detector for AI agent malicious operation behavior. The tool reads sample zip files, extracts Linux `session.jsonl` / `audit.log` / `network.pcap` evidence plus optional Windows Sysmon-style logs, applies configurable rules and scoring, and writes:
 
 - `result.csv`: final submission format with only `md5,label`
 - `detail.jsonl`: local debugging explanations, rule hits, evidence excerpts, warnings, and optional LLM attribution
@@ -23,6 +23,14 @@ python3 -m pip install -e ".[pcap]"
 
 If `scapy` or `dpkt` is missing, PCAP parsing degrades gracefully and the pipeline still completes.
 
+Optional EVTX parsing support:
+
+```bash
+python3 -m pip install -e ".[evtx]"
+```
+
+Sysmon JSON/JSONL/CSV/XML/TXT parsing does not require the EVTX extra.
+
 ## Create Synthetic Samples
 
 The repository does not include official data. Use the synthetic sanitized generator for local smoke tests:
@@ -39,7 +47,8 @@ python3 scripts/run_detect.py \
   --output output/result.csv \
   --detail-output output/detail.jsonl \
   --workdir data/work/run \
-  --config configs/default.yaml
+  --config configs/default.yaml \
+  --profile balanced
 ```
 
 Official-style command:
@@ -54,6 +63,14 @@ python3 scripts/run_detect.py \
 ```
 
 `--input` may be a single zip, a directory containing multiple zips, or a nested dataset directory. The sample `md5` is the zip file stem.
+
+Profiles:
+
+- `balanced`: recommended default
+- `recall`: recall-first rule thresholds
+- `precision`: precision-first rule thresholds
+
+`configs/default.yaml` points to the balanced profile. CLI `--profile` overrides the profile in the config file.
 
 ## Evaluate Labeled Example Data
 
@@ -74,15 +91,19 @@ Use these helpers after a labeled local validation run:
 ```bash
 python3 scripts/analyze_predictions.py --pred output/result_rule.csv --truth data/example/example-s7/results.csv --detail output/detail_rule.jsonl
 python3 scripts/threshold_sweep.py --detail output/detail_rule.jsonl --truth data/example/example-s7/results.csv
+python3 scripts/make_candidates.py --input data/example/example-s7 --output-dir output/candidates --workdir data/work/candidates --config configs/default.yaml --truth data/example/example-s7/results.csv
+python3 scripts/offline_check.py
 ```
 
 `analyze_predictions.py` reports prediction coverage, TP/TN/FP/FN counts, FP/FN detail summaries, FP rule ranking, and rules that hit every detail row. `threshold_sweep.py` reports accuracy, precision, recall, f1, TP, TN, FP, and FN across score thresholds.
+
+`make_candidates.py` runs precision, balanced, recall, and balanced local-LLM borderline candidates. `offline_check.py` verifies imports, configs, local endpoint reachability, parser availability, and `.gitignore` coverage without contacting public network services.
 
 The diagnostic scripts also print `md5_alignment`. If a labeled example set has exactly one truth md5 that does not match exactly one input zip stem, evaluation aliases that pair for metrics only. The submitted `result.csv` is still written with input zip stems.
 
 ## Optional LLM Attribution
 
-The detector is rule-first. LLM attribution is optional and only used for medium or higher rule scores.
+The detector is rule-first. LLM attribution is optional, local-only by default, and selected with `--use-llm --llm-mode off|borderline|all|explain-only`.
 
 Default local OpenAI-compatible endpoint:
 
@@ -98,7 +119,9 @@ python3 scripts/run_detect.py \
   --detail-output output/detail_llm.jsonl \
   --workdir data/work/run_llm \
   --config configs/default.yaml \
-  --use-llm
+  --profile balanced \
+  --use-llm \
+  --llm-mode borderline
 ```
 
 If the local endpoint is unavailable, the pipeline automatically falls back to mock attribution. External public LLM endpoints are disabled by default for compliance. For temporary local development overrides, use environment variables instead of committing secrets:
@@ -107,14 +130,6 @@ If the local endpoint is unavailable, the pipeline automatically falls back to m
 export AGENTSEC_LLM_BASE_URL="http://127.0.0.1:8000/v1"
 export AGENTSEC_LLM_MODEL="qwen36-27b"
 export AGENTSEC_LLM_API_KEY=""
-```
-
-Temporary DeepSeek smoke tests are supported, but should not be used for official offline runs:
-
-```bash
-export AGENTSEC_LLM_PROVIDER="deepseek"
-export DEEPSEEK_API_KEY="<set locally only>"
-export AGENTSEC_ALLOW_EXTERNAL_LLM="1"
 ```
 
 ## Offline Mode

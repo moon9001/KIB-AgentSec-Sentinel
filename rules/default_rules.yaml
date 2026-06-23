@@ -18,6 +18,13 @@ weights:
   combo_credential_shell: 60
   combo_privilege_shell_network_context: 55
   correlated_agent_audit_network: 55
+  combo_powershell_network: 58
+  combo_persistence_command: 58
+  combo_lateral_credential: 65
+  suspicious_powershell: 8
+  persistence: 8
+  lateral_movement: 10
+  suspicious_command: 4
 
 keywords:
   sensitive_paths:
@@ -38,6 +45,10 @@ keywords:
     - private key
     - access_key
     - api_key
+    - lsass
+    - ntds.dit
+    - mimikatz
+    - sam
   read_markers:
     - read_file
     - cat
@@ -45,6 +56,12 @@ keywords:
     - copy
     - cp
     - download
+    - type
+    - findstr
+    - get-content
+    - reg save
+    - procdump
+    - mimikatz
   compression_tools:
     - tar
     - zip
@@ -105,6 +122,72 @@ keywords:
     - bash
     - sh
     - powershell
+    - pwsh
+    - cmd.exe
+  suspicious_commands:
+    - powershell
+    - pwsh
+    - cmd.exe
+    - "cmd "
+    - wscript
+    - cscript
+    - rundll32
+    - regsvr32
+    - mshta
+    - wmic
+    - schtasks
+    - bitsadmin
+    - certutil
+    - curl
+    - wget
+    - scp
+    - ftp
+    - sftp
+    - python
+    - node
+  suspicious_powershell_markers:
+    - encodedcommand
+    - "-enc"
+    - downloadstring
+    - invoke-webrequest
+    - invoke-restmethod
+    - iex
+    - bypass
+    - hidden
+    - noprofile
+  persistence_markers:
+    - runonce
+    - "\\run"
+    - startup
+    - schtasks
+    - sc create
+    - new-service
+    - service create
+  lateral_movement_markers:
+    - psexec
+    - wmic process call create
+    - winrm
+    - enter-pssession
+    - invoke-command
+    - mstsc
+    - admin$
+    - c$
+    - ipc$
+    - "\\\\"
+  windows_credential_artifacts:
+    - lsass
+    - ntds.dit
+    - "\\windows\\system32\\config\\sam"
+    - "\\windows\\system32\\config\\system"
+    - "\\windows\\system32\\config\\security"
+    - "hklm\\sam"
+    - "hklm\\system"
+    - "hklm\\security"
+    - mimikatz
+    - procdump
+    - login data
+    - cookies
+    - web data
   suspicious_domains:
     - paste
     - transfer
