@@ -15,39 +15,30 @@ def score_hits(hits: list[RuleHit], scoring_config: dict[str, Any], signals: dic
     strong_chain_threshold = float(scoring_config.get("strong_chain_threshold", levels.get("high", 55)))
     weak_cap = float(scoring_config.get("weak_signal_score_cap", max(0, score_threshold - 1)))
     require_chain = bool(scoring_config.get("require_chain_for_label1", True))
-    min_strong_categories = int(scoring_config.get("min_strong_categories_for_label1", 2))
     terminal_rule_ids = set(scoring_config.get("terminal_rule_ids", ["R005"]))
 
     terminal_hits = [hit for hit in hits if hit.severity == "terminal" and hit.rule_id in terminal_rule_ids]
-    chain_hits = [hit for hit in hits if hit.severity in {"chain", "terminal"}]
-    max_chain_weight = max((float(hit.weight) for hit in chain_hits), default=0.0)
+    guarded_chain_rules = set(str(rule_id) for rule_id in signals.get("strong_chain_rules") or [])
+    guarded_chain_hits = [hit for hit in hits if hit.rule_id in guarded_chain_rules and hit.severity in {"chain", "terminal"}]
+    max_chain_weight = max((float(hit.weight) for hit in guarded_chain_hits), default=0.0)
 
     has_terminal = bool(terminal_hits)
-    has_strong_chain = bool(chain_hits)
-    strong_category_count = int(signals.get("strong_category_count") or 0)
-    qualifying_chain = (
-        has_strong_chain
-        and strong_category_count >= min_strong_categories
-        and (
-            max_chain_weight >= score_threshold
-            or (max_chain_weight >= strong_chain_threshold and score >= score_threshold)
-        )
-    )
+    has_explicit_malicious_action = bool(signals.get("explicit_malicious_action"))
+    has_guarded_chain = bool(guarded_chain_hits)
+    qualifying_chain = has_guarded_chain and max_chain_weight >= strong_chain_threshold
 
     if has_terminal:
-        score = max(score, strong_chain_threshold)
-    elif require_chain and not has_strong_chain:
-        score = min(score, weak_cap)
+        score = max(score, score_threshold)
+    elif has_explicit_malicious_action:
+        score = max(score, score_threshold)
     elif qualifying_chain:
-        score = max(score, strong_chain_threshold)
+        score = max(score, score_threshold)
     elif require_chain:
-        score = min(score, max(0.0, score_threshold - 1.0))
+        score = min(score, weak_cap)
 
     score = min(max_score, score)
     label = 0
-    if has_terminal:
-        label = 1
-    elif qualifying_chain and score >= score_threshold:
+    if has_terminal or has_explicit_malicious_action or qualifying_chain:
         label = 1
     return round(score, 2), label, risk_level(score, scoring_config)
 

