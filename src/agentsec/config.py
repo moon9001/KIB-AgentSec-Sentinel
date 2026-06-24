@@ -86,6 +86,7 @@ DEFAULT_RULES: dict[str, Any] = {
         "combo_sensitive_shell_network_observed": 55,
         "combo_credential_package_network_observed": 55,
         "combo_credential_archive_post": 56,
+        "combo_credential_command_exfil": 60,
         "suspicious_powershell": 8,
         "persistence": 8,
         "lateral_movement": 10,

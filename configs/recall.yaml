@@ -37,6 +37,7 @@ rules:
     combo_sensitive_shell_network_observed: 56
     combo_credential_package_network_observed: 56
     combo_credential_archive_post: 58
+    combo_credential_command_exfil: 58
 
 llm:
   enabled: false

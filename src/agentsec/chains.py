@@ -26,7 +26,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
-    if (strong_chain_rules & {"R104", "R109", "R113", "R115", "R116"}) and signals.get("credential_access") and (
+    if (strong_chain_rules & {"R104", "R109", "R113", "R115", "R116", "R117"}) and signals.get("credential_access") and (
         signals.get("network_transfer") or signals.get("compression") or signals.get("network_post") or signals.get("copy_or_download")
     ):
         chains.append(
@@ -36,6 +36,17 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
                 "risk": "critical",
                 "steps": ["credential_access", "package_or_transfer"],
                 "supporting_rules": sorted(set(hit_by_category.get("credential", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R117" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:credential-command-exfil",
+                "title": "Credential file access with real command exfiltration",
+                "risk": "high",
+                "steps": ["credential_file_path", "real_command_context", "network_transfer"],
+                "supporting_rules": sorted(set(hit_by_category.get("credential", []) + hit_by_category.get("network", []) + hit_by_category.get("command", []) + hit_by_category.get("combo", []))),
             }
         )
 

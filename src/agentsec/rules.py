@@ -211,7 +211,19 @@ class RuleEngine:
             or credential_shell_events
             or [event for event in credential_events if self._has_real_credential_artifact(f"{self._command_text(event)} {event.text.lower()}")]
         )
+        credential_path_events = [
+            event for event in credential_events if self._has_real_credential_artifact(f"{self._command_text(event)} {event.text.lower()}")
+        ]
+        credential_command_events = [
+            event for event in credential_path_events if self._is_command_access_context(event) and not self._is_plain_session_text(event)
+        ]
         strong_file_context = bool(strong_sensitive_events or strong_credential_events or credential_shell_events or credential_file_path)
+        real_command_credential_exfil = bool(
+            credential_file_path
+            and command_context_events
+            and (shell_events or suspicious_command_events)
+            and (network_events or network_post)
+        )
 
         if credential_file_path and command_context_events and compression_events and network_post:
             hits.append(
@@ -235,6 +247,22 @@ class RuleEngine:
                     "combo_credential_package_network_observed",
                     [credential_events[0], (compression_events or copy_events)[0]],
                     pcap_features if self._is_network_observed(pcap_features) else None,
+                )
+            )
+        if real_command_credential_exfil:
+            hits.append(
+                self._combo_hit(
+                    "R117",
+                    "Credential file access with real command exfiltration",
+                    "combo",
+                    "chain",
+                    "combo_credential_command_exfil",
+                    [
+                        (credential_command_events or credential_shell_events or credential_path_events or credential_events)[0],
+                        (shell_events or suspicious_command_events or command_context_events)[0],
+                        (network_events or [None])[0],
+                    ],
+                    pcap_features if network_post else None,
                 )
             )
         if shell_events and sensitive_chain_events and (network_events or network_post):
@@ -281,6 +309,8 @@ class RuleEngine:
             strong_chain_rules.update(chain_candidate_rules & {"R101", "R106", "R107", "R108", "R105", "R111"})
         if credential_file_path and command_context_events and (network_events or network_post or compression_events or copy_events):
             strong_chain_rules.update(chain_candidate_rules & {"R104", "R116"})
+        if real_command_credential_exfil:
+            strong_chain_rules.update(chain_candidate_rules & {"R117"})
         if credential_shell_events and (network_events or network_post or compression_events or copy_events):
             strong_chain_rules.update(chain_candidate_rules & {"R109"})
         if privilege_events and (strong_file_context or real_exfil or persistence_chain_events):
@@ -562,11 +592,10 @@ class RuleEngine:
             return False
         if self._is_plain_session_text(event):
             return False
-        if self._is_llm_api_discussion_text(command_text) and not contains_any(
-            command_text,
-            ["--upload-file", "--form", " -f ", " -d ", "--data", "--data-binary", "--post-file", "--post-data", "file=@", "/upload"],
-        ):
-            return False
+        if self._is_llm_api_discussion_text(command_text):
+            llm_file_upload_markers = ["--upload-file", "--form", " -f ", "--post-file", "file=@", "/upload"]
+            if not contains_any(command_text, llm_file_upload_markers):
+                return False
         direct_transfer = contains_any(command_text, ["scp", "sftp", "rsync", "ftp ", "upload"])
         curl_upload = contains_any(
             command_text,
