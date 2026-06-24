@@ -171,6 +171,7 @@ def _strip_ns(tag: str) -> str:
 
 
 def _event_from_record(md5: str, record: dict[str, Any], source_name: str) -> Event:
+    record = _normalize_record(record)
     flat = flatten_value(record)
     fields: dict[str, Any] = {}
     for canonical, aliases in FIELD_ALIASES.items():
@@ -195,6 +196,31 @@ def _event_from_record(md5: str, record: dict[str, Any], source_name: str) -> Ev
         text=text,
         fields=fields,
     )
+
+
+def _normalize_record(record: dict[str, Any]) -> dict[str, Any]:
+    normalized = dict(record)
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            name = value.get("Name") or value.get("@Name") or value.get("name")
+            data_value = (
+                value.get("#text")
+                or value.get("text")
+                or value.get("Value")
+                or value.get("value")
+                or value.get("_")
+            )
+            if name and data_value not in (None, ""):
+                normalized[str(name)] = data_value
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(record)
+    return normalized
 
 
 def _first_flat(flat: dict[str, str], aliases: list[str]) -> str | None:

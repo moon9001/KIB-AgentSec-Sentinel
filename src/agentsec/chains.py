@@ -13,7 +13,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
         hit_by_category.setdefault(hit.category, []).append(hit.rule_id)
 
     chains: list[dict[str, Any]] = []
-    if signals.get("sensitive_access") and signals.get("compression") and (
+    if (strong_chain_rules & {"R101", "R106", "R107", "R108", "R105", "R116"}) and signals.get("sensitive_access") and signals.get("compression") and (
         signals.get("network_transfer") or signals.get("network_post")
     ):
         chains.append(
@@ -26,7 +26,7 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
             }
         )
 
-    if signals.get("credential_access") and (
+    if (strong_chain_rules & {"R104", "R109", "R113", "R115", "R116"}) and signals.get("credential_access") and (
         signals.get("network_transfer") or signals.get("compression") or signals.get("network_post") or signals.get("copy_or_download")
     ):
         chains.append(
@@ -135,6 +135,39 @@ def build_behavior_chains(md5: str, hits: list[RuleHit], features: SampleFeature
                 "risk": "critical",
                 "steps": ["lateral_movement", "credential_access"],
                 "supporting_rules": sorted(set(hit_by_category.get("lateral", []) + hit_by_category.get("credential", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R114" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:sensitive-shell-network-context",
+                "title": "Sensitive access with shell command and network context",
+                "risk": "high",
+                "steps": ["sensitive_access", "shell_or_cmd", "network_context"],
+                "supporting_rules": sorted(set(hit_by_category.get("file", []) + hit_by_category.get("agent", []) + hit_by_category.get("command", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R115" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:credential-package-network-context",
+                "title": "Credential access with packaging and network context",
+                "risk": "high",
+                "steps": ["credential_access", "package_or_copy", "network_context"],
+                "supporting_rules": sorted(set(hit_by_category.get("credential", []) + hit_by_category.get("archive", []) + hit_by_category.get("combo", []))),
+            }
+        )
+
+    if "R116" in strong_chain_rules:
+        chains.append(
+            {
+                "chain_id": f"{md5}:credential-archive-post",
+                "title": "Credential access with archive and HTTP POST evidence",
+                "risk": "critical",
+                "steps": ["credential_access", "archive_or_compression", "network_post"],
+                "supporting_rules": sorted(set(hit_by_category.get("credential", []) + hit_by_category.get("archive", []) + hit_by_category.get("network", []) + hit_by_category.get("combo", []))),
             }
         )
 

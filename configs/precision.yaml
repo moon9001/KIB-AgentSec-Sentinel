@@ -35,6 +35,9 @@ rules:
     combo_powershell_network: 62
     combo_persistence_command: 60
     combo_lateral_credential: 68
+    combo_sensitive_shell_network_observed: 52
+    combo_credential_package_network_observed: 52
+    combo_credential_archive_post: 54
 
 llm:
   enabled: false

@@ -345,6 +345,204 @@ def test_profiles_split_borderline_privilege_network_chain() -> None:
     assert recall_score >= _recall_config["scoring"]["score_threshold"]
 
 
+def test_persistence_marker_without_command_context_stays_weak() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    engine = RuleEngine(balanced_rules)
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/home/demo/.ssh/id_rsa"',
+            fields={"name": "/home/demo/.ssh/id_rsa"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="tar" a1="czf" a2="/tmp/project.tgz" a3="/workspace/project"',
+            fields={"a0": "tar", "a1": "czf", "a2": "/tmp/project.tgz", "a3": "/workspace/project"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="curl" a1="-s" a2="https://example.invalid/status"',
+            fields={"a0": "curl", "a1": "-s", "a2": "https://example.invalid/status"},
+        ),
+        Event(
+            md5="synthetic",
+            source="session",
+            event_type="tool_call",
+            text='{"tool":"gateway.sessions.remove","action":"sessions.remove"}',
+            fields={"tool": "gateway.sessions.remove", "action": "sessions.remove"},
+        ),
+        Event(
+            md5="synthetic",
+            source="sysmon",
+            event_type="1",
+            text="schtasks /Create /SC ONLOGON /TN Demo /TR demo.exe",
+            fields={"image": "C:\\Windows\\System32\\schtasks.exe", "command_line": "schtasks /Create /SC ONLOGON /TN Demo /TR demo.exe"},
+        ),
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "external_ip_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+    rule_ids = {hit.rule_id for hit in hits}
+    assert "R013" in rule_ids
+    assert "R112" not in rule_ids
+    assert signals["shell_or_cmd"] is False
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < _balanced_config["scoring"]["score_threshold"]
+
+
+def test_balanced_credential_archive_post_promotes_but_precision_holds() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    _precision_config, precision_rules = load_config("configs/default.yaml", profile="precision")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/workspace/secrets/token"',
+            fields={"name": "/workspace/secrets/token"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="tar" a1="czf" a2="/tmp/bundle.tgz" a3="/workspace"',
+            fields={"a0": "tar", "a1": "czf", "a2": "/tmp/bundle.tgz", "a3": "/workspace"},
+        ),
+    ]
+    pcap = {
+        "http_post_count": 1,
+        "http_hosts": [["upload.example.invalid", 1]],
+        "http_paths": [["/upload", 1]],
+        "external_ip_count": 1,
+        "dst_ports": [443],
+    }
+
+    balanced_hits, balanced_signals = RuleEngine(balanced_rules).evaluate(events, pcap)
+    balanced_score, balanced_label, _risk = score_hits(balanced_hits, _balanced_config["scoring"], balanced_signals)
+    precision_hits, precision_signals = RuleEngine(precision_rules).evaluate(events, pcap)
+    precision_score, precision_label, _risk = score_hits(precision_hits, _precision_config["scoring"], precision_signals)
+
+    assert "R116" in {hit.rule_id for hit in balanced_hits}
+    assert balanced_label == 1
+    assert balanced_score >= _balanced_config["scoring"]["score_threshold"]
+    assert "R116" in {hit.rule_id for hit in precision_hits}
+    assert precision_label == 0
+    assert precision_score < _precision_config["scoring"]["score_threshold"]
+
+
+def test_balanced_sensitive_shell_suspicious_network_context_promotes() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    _precision_config, precision_rules = load_config("configs/default.yaml", profile="precision")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="bash" a1="-lc" a2="python /tmp/check.py /etc/passwd"',
+            fields={"a0": "bash", "a1": "-lc", "a2": "python /tmp/check.py /etc/passwd"},
+        )
+    ]
+    pcap = {"http_post_count": 0, "external_ip_count": 1, "dst_ports": [443]}
+
+    balanced_hits, balanced_signals = RuleEngine(balanced_rules).evaluate(events, pcap)
+    balanced_score, balanced_label, _risk = score_hits(balanced_hits, _balanced_config["scoring"], balanced_signals)
+    precision_hits, precision_signals = RuleEngine(precision_rules).evaluate(events, pcap)
+    precision_score, precision_label, _risk = score_hits(precision_hits, _precision_config["scoring"], precision_signals)
+
+    assert "R114" in {hit.rule_id for hit in balanced_hits}
+    assert balanced_label == 1
+    assert balanced_score >= _balanced_config["scoring"]["score_threshold"]
+    assert "R114" in {hit.rule_id for hit in precision_hits}
+    assert precision_label == 0
+    assert precision_score < _precision_config["scoring"]["score_threshold"]
+
+
+def test_balanced_credential_package_network_context_promotes() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    _precision_config, precision_rules = load_config("configs/default.yaml", profile="precision")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH name="/workspace/credentials/app.secret"',
+            fields={"name": "/workspace/credentials/app.secret"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE a0="zip" a1="-r" a2="/tmp/archive.zip" a3="/workspace"',
+            fields={"a0": "zip", "a1": "-r", "a2": "/tmp/archive.zip", "a3": "/workspace"},
+        ),
+    ]
+    pcap = {"http_post_count": 0, "external_ip_count": 1, "dst_ports": [443]}
+
+    balanced_hits, balanced_signals = RuleEngine(balanced_rules).evaluate(events, pcap)
+    balanced_score, balanced_label, _risk = score_hits(balanced_hits, _balanced_config["scoring"], balanced_signals)
+    precision_hits, precision_signals = RuleEngine(precision_rules).evaluate(events, pcap)
+    precision_score, precision_label, _risk = score_hits(precision_hits, _precision_config["scoring"], precision_signals)
+
+    assert "R115" in {hit.rule_id for hit in balanced_hits}
+    assert balanced_label == 1
+    assert balanced_score >= _balanced_config["scoring"]["score_threshold"]
+    assert "R115" in {hit.rule_id for hit in precision_hits}
+    assert precision_label == 0
+    assert precision_score < _precision_config["scoring"]["score_threshold"]
+
+
+def test_nested_sysmon_eventdata_fields_are_mapped(tmp_path) -> None:
+    path = tmp_path / "sysmon.jsonl"
+    path.write_text(
+        "\n".join(
+            [
+                '{"Event":{"System":{"EventID":1},"EventData":{"Data":[{"Name":"Image","#text":"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"},{"Name":"CommandLine","#text":"powershell -NoProfile -ExecutionPolicy Bypass -EncodedCommand AAAA Get-Content C:\\\\Users\\\\demo\\\\.ssh\\\\id_rsa"},{"Name":"User","#text":"demo"}]}}}',
+                '{"Event":{"System":{"EventID":3},"EventData":{"Data":[{"Name":"Image","#text":"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe"},{"Name":"DestinationIp","#text":"203.0.113.10"},{"Name":"DestinationPort","#text":"443"}]}}}',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    events, warnings = parse_sysmon_file("synthetic", path)
+    assert warnings == []
+    assert any(event.fields.get("command_line") for event in events)
+    assert any(event.fields.get("destination_ip") for event in events)
+    engine = RuleEngine(DEFAULT_RULES)
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "external_ip_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R109" in {hit.rule_id for hit in hits}
+    assert signals["sysmon_network_observed"] is True
+    assert label == 1
+    assert score >= SCORING["score_threshold"]
+
+
+def test_agent_recursive_delete_of_skills_is_destructive() -> None:
+    engine = RuleEngine(DEFAULT_RULES)
+    events = [
+        Event(
+            md5="synthetic",
+            source="session",
+            event_type="tool_call",
+            text='{"tool":"cmd_run","cmd":"powershell Remove-Item -LiteralPath $HOME/.openclaw/skills/suspicious -Recurse -Force"}',
+            fields={
+                "tool": "cmd_run",
+                "cmd": "powershell Remove-Item -LiteralPath $HOME/.openclaw/skills/suspicious -Recurse -Force",
+            },
+        )
+    ]
+    hits, signals = engine.evaluate(events, {"http_post_count": 0, "external_ip_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, SCORING, signals)
+    assert "R005" in {hit.rule_id for hit in hits}
+    assert signals["destructive"] is True
+    assert label == 1
+    assert score >= SCORING["score_threshold"]
+
+
 def test_llm_mock_without_allowed_endpoint() -> None:
     analyzer = LLMAnalyzer(
         {

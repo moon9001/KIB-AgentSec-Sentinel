@@ -32,7 +32,8 @@ class RuleEngine:
         agent_tool_events = self._matching_events(events, self._is_agent_tool_abuse)
         network_post = self._is_network_post_exfil(pcap_features)
         suspicious_network = self._is_suspicious_network(pcap_features, network_post)
-        network_observed = self._is_network_observed(pcap_features)
+        sysmon_network_events = self._matching_events(events, self._is_sysmon_network_observed)
+        network_observed = self._is_network_observed(pcap_features) or bool(sysmon_network_events)
         shell_events = self._matching_events(events, self._is_shell_or_cmd_event)
         copy_events = self._matching_events(events, self._is_copy_action)
         suspicious_command_events = self._matching_events(events, self._is_suspicious_command)
@@ -164,7 +165,8 @@ class RuleEngine:
                     pcap_features if network_post else None,
                 )
             )
-        if persistence_events and suspicious_command_events:
+        persistence_chain_events = persistence_events if (shell_events or agent_tool_events or suspicious_powershell_events) else []
+        if persistence_chain_events and suspicious_command_events:
             hits.append(
                 self._combo_hit(
                     "R112",
@@ -172,7 +174,7 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_persistence_command",
-                    [persistence_events[0], suspicious_command_events[0]],
+                    [persistence_chain_events[0], suspicious_command_events[0]],
                 )
             )
         if lateral_events and credential_exfil_events:
@@ -198,6 +200,30 @@ class RuleEngine:
                     pcap_features if network_post else None,
                 )
             )
+        if credential_events and compression_events and network_post:
+            hits.append(
+                self._combo_hit(
+                    "R116",
+                    "Credential access with archive and HTTP POST evidence",
+                    "combo",
+                    "chain",
+                    "combo_credential_archive_post",
+                    [credential_events[0], compression_events[0]],
+                    pcap_features,
+                )
+            )
+        if credential_events and (compression_events or copy_events) and network_observed and not (network_events or network_post):
+            hits.append(
+                self._combo_hit(
+                    "R115",
+                    "Credential access with packaging and network context",
+                    "combo",
+                    "chain",
+                    "combo_credential_package_network_observed",
+                    [credential_events[0], (compression_events or copy_events)[0]],
+                    pcap_features if self._is_network_observed(pcap_features) else None,
+                )
+            )
         if shell_events and sensitive_chain_events and (network_events or network_post):
             hits.append(
                 self._combo_hit(
@@ -208,6 +234,18 @@ class RuleEngine:
                     "combo_shell_sensitive_network",
                     [shell_events[0], sensitive_chain_events[0], (network_events or [None])[0]],
                     pcap_features if network_post else None,
+                )
+            )
+        if sensitive_events and shell_events and suspicious_command_events and network_observed and not (network_events or network_post):
+            hits.append(
+                self._combo_hit(
+                    "R114",
+                    "Sensitive access with shell command and network context",
+                    "combo",
+                    "chain",
+                    "combo_sensitive_shell_network_observed",
+                    [sensitive_events[0], shell_events[0], suspicious_command_events[0]],
+                    pcap_features if self._is_network_observed(pcap_features) else None,
                 )
             )
         if agent_tool_events and (network_events or network_post) and (sensitive_chain_events or credential_exfil_events):
@@ -225,14 +263,18 @@ class RuleEngine:
 
         strong_chain_rules = {hit.rule_id for hit in hits if hit.severity in {"chain", "terminal"}}
         max_chain_weight = max((float(hit.weight) for hit in hits if hit.severity in {"chain", "terminal"}), default=0.0)
+        rule_ids = {hit.rule_id for hit in hits}
+        weak_credential_chain = bool(rule_ids & {"R115", "R116"})
+        weak_sensitive_chain = bool(rule_ids & {"R114"})
+        observed_network_chain = bool(rule_ids & {"R114", "R115"})
         strong_categories = sorted(
             {
                 category
                 for category, active in {
-                    "sensitive": bool(sensitive_events),
-                    "credential": bool(strong_credential_events or credential_shell_events),
+                    "sensitive": bool(strong_sensitive_events or weak_sensitive_chain),
+                    "credential": bool(strong_credential_events or credential_shell_events or weak_credential_chain),
                     "archive": bool(compression_events),
-                    "network": bool(network_events or network_post or (network_observed and self.behavior.get("include_network_observed_as_strong_category", False))),
+                    "network": bool(network_events or network_post or observed_network_chain or (network_observed and self.behavior.get("include_network_observed_as_strong_category", False))),
                     "privilege": bool(privilege_events),
                     "cleanup": bool(cleanup_events),
                     "destructive": bool(destructive_events),
@@ -254,6 +296,7 @@ class RuleEngine:
             "network_transfer": bool(network_events),
             "network_post": bool(network_post),
             "network_observed": bool(network_observed),
+            "sysmon_network_observed": bool(sysmon_network_events),
             "destructive": bool(destructive_events),
             "privilege": bool(privilege_events),
             "trace_cleanup": bool(cleanup_events),
@@ -491,12 +534,39 @@ class RuleEngine:
             )
         return contains_any(command_text, self.keywords.get("upload_tools", []))
 
+    def _is_sysmon_network_observed(self, event: Event) -> bool:
+        if event.source != "sysmon":
+            return False
+        if event.event_type not in {"3", "network", "network_connection"}:
+            return False
+        fields = event.fields or {}
+        return bool(fields.get("destination_ip") or fields.get("destination_port") or fields.get("query_name"))
+
     def _is_destructive_action(self, event: Event) -> bool:
         command_text = self._command_text(event)
         if event.source == "audit" and event.event_type not in {"execve", "proctitle", "syscall"}:
             return False
         if event.source == "session" and event.event_type in {"message", "session", "model_change", "thinking_level_change", "custom"}:
             return False
+        agent_asset_path = contains_any(
+            command_text,
+            [
+                ".openclaw/skills",
+                "agent skills",
+                "/skills/",
+                "\\skills\\",
+                "plugins/",
+                "\\plugins\\",
+                "tools/",
+                "\\tools\\",
+            ],
+        )
+        recursive_delete = (
+            contains_any(command_text, ["rm -rf", "rm -fr", "rm -r -f", "rmdir /s /q", "del /f /s /q"])
+            or ("remove-item" in command_text and "-recurse" in command_text and "-force" in command_text)
+        )
+        if agent_asset_path and recursive_delete:
+            return True
         return contains_any(command_text, self.keywords.get("destructive_commands", []))
 
     def _is_copy_action(self, event: Event) -> bool:
