@@ -286,15 +286,28 @@ def apply_final_llm_review(results: list[DetectionResult], llm: Any, config: dic
     reviewed = 0
     changed = 0
     skipped = 0
+    timed_out = 0
     for result in results:
         skip_reason = final_llm_review_skip_reason(result)
         if skip_reason is not None:
             skipped += 1
+            review = _normalize_final_review_detail(
+                {"mode": "final_review_skipped", "reason": skip_reason},
+                eligible=False,
+                selected=False,
+                skip_reason=skip_reason,
+            )
+            result.llm_analysis = _merge_llm_analysis(result.llm_analysis, review)
+            result.llm_decision = result.llm_analysis
             continue
         reviewed += 1
-        review = llm.review_final(result)
-        review["selected"] = True
-        review["change"] = False
+        review = _normalize_final_review_detail(
+            llm.review_final(result),
+            eligible=True,
+            selected=True,
+        )
+        if review.get("timeout"):
+            timed_out += 1
         verdict = str(review.get("verdict", "")).strip().lower()
         try:
             confidence = float(review.get("confidence") or 0)
@@ -307,6 +320,7 @@ def apply_final_llm_review(results: list[DetectionResult], llm: Any, config: dic
             result.label_after_llm = result.label
             result.llm_changed_label = True
             review["change"] = True
+            review["changed"] = True
             review["label_correction"] = f"{old_label}->0"
             result.summary = f"{result.summary}; llm_final_review={old_label}->0"
             changed += 1
@@ -316,7 +330,41 @@ def apply_final_llm_review(results: list[DetectionResult], llm: Any, config: dic
             review.setdefault("label_correction", "unchanged")
         result.llm_analysis = _merge_llm_analysis(result.llm_analysis, review)
         result.llm_decision = result.llm_analysis
-    return {"enabled": True, "reviewed": reviewed, "changed": changed, "skipped": skipped, "min_confidence": min_confidence}
+    return {
+        "enabled": True,
+        "reviewed": reviewed,
+        "changed": changed,
+        "skipped": skipped,
+        "timeouts": timed_out,
+        "min_confidence": min_confidence,
+    }
+
+
+def _normalize_final_review_detail(
+    review: dict[str, Any],
+    eligible: bool,
+    selected: bool,
+    skip_reason: str = "",
+) -> dict[str, Any]:
+    normalized = dict(review or {})
+    normalized.setdefault("mode", "final_review_skipped" if not selected else "final_review")
+    normalized["eligible"] = eligible
+    normalized["selected"] = selected
+    normalized.setdefault("verdict", "unchanged")
+    normalized.setdefault("confidence", 0)
+    normalized.setdefault("reason", skip_reason or normalized.get("error", "") or "")
+    if skip_reason:
+        normalized["skip_reason"] = skip_reason
+    elif selected and normalized.get("mode") != "llm_final_review":
+        normalized["skip_reason"] = str(normalized.get("reason", "") or normalized.get("error", ""))
+    else:
+        normalized.setdefault("skip_reason", "")
+    normalized.setdefault("change", False)
+    normalized.setdefault("changed", False)
+    normalized.setdefault("timeout", False)
+    normalized.setdefault("retry_count", 0)
+    normalized.setdefault("raw_response_short", "")
+    return normalized
 
 
 def _merge_llm_analysis(existing: dict[str, Any] | None, final_review: dict[str, Any]) -> dict[str, Any]:

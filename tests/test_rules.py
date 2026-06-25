@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import requests
+
 from agentsec.chains import build_behavior_chains
 from agentsec.config import DEFAULT_RULES
 from agentsec.config import load_config
@@ -939,6 +941,9 @@ def test_final_llm_review_can_only_downgrade_selected_benign() -> None:
     assert result.label == 0
     assert result.llm_changed_label is True
     assert result.llm_analysis["final_review"]["change"] is True
+    assert result.llm_analysis["final_review"]["changed"] is True
+    assert result.llm_analysis["final_review"]["eligible"] is True
+    assert result.llm_analysis["final_review"]["selected"] is True
 
 
 def test_final_llm_review_keeps_rule_result_when_unavailable_or_uncertain() -> None:
@@ -952,6 +957,9 @@ def test_final_llm_review_keeps_rule_result_when_unavailable_or_uncertain() -> N
     assert result.label == 1
     assert result.llm_changed_label is False
     assert result.llm_analysis["final_review"]["change"] is False
+    assert result.llm_analysis["final_review"]["changed"] is False
+    assert result.llm_analysis["final_review"]["selected"] is True
+    assert result.llm_analysis["final_review"]["skip_reason"] == "offline"
 
 
 def test_final_llm_review_never_upgrades_label0() -> None:
@@ -963,6 +971,9 @@ def test_final_llm_review_never_upgrades_label0() -> None:
     assert reviewer.calls == 0
     assert summary["reviewed"] == 0
     assert result.label == 0
+    assert result.llm_analysis["final_review"]["eligible"] is False
+    assert result.llm_analysis["final_review"]["selected"] is False
+    assert result.llm_analysis["final_review"]["skip_reason"] == "rule label is not 1"
 
 
 def test_final_llm_review_skips_confirmed_real_exfil_chain() -> None:
@@ -981,13 +992,93 @@ def test_final_llm_review_skips_confirmed_real_exfil_chain() -> None:
     assert result.label == 1
 
 
+def test_final_llm_review_timeout_retries_once(monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_post(*_args, **kwargs):
+        calls.append(kwargs)
+        raise requests.exceptions.Timeout("slow final review")
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    result = _aggregate_positive_result()
+    analyzer = LLMAnalyzer(
+        {
+            "mode": "borderline",
+            "cache": False,
+            "final_review_timeout": 300,
+            "final_review_retries": 1,
+        }
+    )
+
+    review = analyzer.review_final(result)
+
+    assert len(calls) == 2
+    assert calls[0]["timeout"] == 300
+    assert review["mode"] == "final_review_skipped"
+    assert review["verdict"] == "unchanged"
+    assert review["confidence"] == 0
+    assert review["timeout"] is True
+    assert review["retry_count"] == 1
+    assert review["raw_response_short"] == ""
+
+
+def test_final_llm_review_request_is_short_and_bounded(monkeypatch) -> None:
+    captured: dict = {}
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"verdict":"benign","confidence":0.9,"reason":"aggregate"}',
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(*_args, **kwargs):
+        captured.update(kwargs)
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    result = _aggregate_positive_result()
+    analyzer = LLMAnalyzer(
+        {
+            "mode": "borderline",
+            "cache": False,
+            "final_review_timeout": 321,
+            "final_review_max_tokens": 64,
+            "final_review_retries": 1,
+        }
+    )
+
+    review = analyzer.review_final(result)
+    payload = captured["json"]
+    prompt = payload["messages"][1]["content"]
+
+    assert captured["timeout"] == 321
+    assert payload["temperature"] == 0.0
+    assert payload["max_tokens"] == 64
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "evidence" not in prompt
+    assert "excerpt" not in prompt
+    assert review["mode"] == "llm_final_review"
+    assert review["timeout"] is False
+    assert review["retry_count"] == 0
+    assert "benign" in review["raw_response_short"]
+
+
 def test_final_llm_review_prompt_uses_structured_fields_only() -> None:
     result = _aggregate_positive_result()
     analyzer = LLMAnalyzer({"mode": "off", "cache": False})
 
     prompt = analyzer._final_review_prompt(result)
 
-    assert '"sample_id": "abcdef12"' in prompt
+    assert '"id": "abcdef12"' in prompt
     assert "matched_rules" in prompt
     assert "behavior_chains" in prompt
     assert "strong_chain_rules" in prompt

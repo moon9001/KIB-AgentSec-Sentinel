@@ -26,6 +26,25 @@ class LLMAnalyzer:
             or os.getenv("OPENAI_API_KEY")
             or ""
         )
+        self.final_review_timeout = float(
+            os.getenv(
+                "AGENTSEC_LLM_FINAL_REVIEW_TIMEOUT",
+                str(llm_config.get("final_review_timeout", llm_config.get("llm_final_review_timeout", 300))),
+            )
+        )
+        self.final_review_max_tokens = int(
+            os.getenv(
+                "AGENTSEC_LLM_FINAL_REVIEW_MAX_TOKENS",
+                str(llm_config.get("final_review_max_tokens", llm_config.get("llm_final_review_max_tokens", 96))),
+            )
+        )
+        self.final_review_retries = int(
+            os.getenv(
+                "AGENTSEC_LLM_FINAL_REVIEW_RETRIES",
+                str(llm_config.get("final_review_retries", llm_config.get("llm_final_review_retries", 1))),
+            )
+        )
+        self.final_review_raw_response_chars = int(llm_config.get("final_review_raw_response_chars", 240))
         allow_external_env = os.getenv("AGENTSEC_ALLOW_EXTERNAL_LLM", "").lower() in {"1", "true", "yes"}
         self.allow_external_api = bool(llm_config.get("allow_external_api", False)) or allow_external_env
         self.mode = str(llm_config.get("mode", "borderline")).strip().lower()
@@ -120,6 +139,10 @@ class LLMAnalyzer:
         if cached is not None:
             cached = dict(cached)
             cached["cached"] = True
+            cached.setdefault("timeout", False)
+            cached.setdefault("retry_count", 0)
+            cached.setdefault("raw_response_short", "")
+            cached.setdefault("changed", False)
             return cached
         self.calls_made += 1
         if not self._is_allowed_endpoint():
@@ -135,37 +158,70 @@ class LLMAnalyzer:
                 {
                     "role": "system",
                     "content": (
-                        "You are an offline false-positive review assistant. Use only the supplied structured "
-                        "rule summary. Do not request or infer raw logs. Return compact JSON only with keys "
-                        "verdict, confidence, reason. verdict must be one of benign, malicious, uncertain."
+                        'Return JSON only: {"verdict":"benign|malicious|unchanged","confidence":0-1,'
+                        '"reason":"short reason"}. Use only the provided JSON. No raw logs.'
                     ),
                 },
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.0,
+            "max_tokens": self.final_review_max_tokens,
+            "chat_template_kwargs": {"enable_thinking": False},
         }
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        try:
-            response = requests.post(
-                f"{self.base_url.rstrip('/')}/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
-            body = response.json()
-            content = body["choices"][0]["message"]["content"]
-            parsed = self._parse_json_content(content)
-            parsed["mode"] = "llm_final_review"
-            parsed["model"] = self.model
-            parsed.setdefault("verdict", "uncertain")
-            parsed.setdefault("confidence", 0)
-            self._cache_put(cache_key, parsed)
-            return parsed
-        except Exception as exc:
-            return self._final_review_skip(f"llm unavailable or invalid response: {exc}")
+
+        last_error = ""
+        raw_response_short = ""
+        max_attempts = max(1, self.final_review_retries + 1)
+        for attempt in range(max_attempts):
+            try:
+                response = requests.post(
+                    f"{self.base_url.rstrip('/')}/chat/completions",
+                    headers=headers,
+                    json=payload,
+                    timeout=self.final_review_timeout,
+                )
+                response.raise_for_status()
+                body = response.json()
+                content = str(body["choices"][0]["message"]["content"])
+                raw_response_short = content[: self.final_review_raw_response_chars]
+                parsed = self._parse_json_content(content)
+                parsed["mode"] = "llm_final_review"
+                parsed["model"] = self.model
+                parsed.setdefault("verdict", "unchanged")
+                parsed.setdefault("confidence", 0)
+                parsed.setdefault("reason", "")
+                parsed["timeout"] = False
+                parsed["retry_count"] = attempt
+                parsed["raw_response_short"] = raw_response_short
+                parsed.setdefault("changed", False)
+                self._cache_put(cache_key, parsed)
+                return parsed
+            except requests.exceptions.Timeout as exc:
+                last_error = str(exc)
+                if attempt + 1 < max_attempts:
+                    continue
+                return self._final_review_skip(
+                    f"llm final review timed out: {last_error}",
+                    timeout=True,
+                    retry_count=attempt,
+                    raw_response_short=raw_response_short,
+                )
+            except Exception as exc:
+                last_error = str(exc)
+                return self._final_review_skip(
+                    f"llm unavailable or invalid response: {last_error}",
+                    timeout=False,
+                    retry_count=attempt,
+                    raw_response_short=raw_response_short,
+                )
+        return self._final_review_skip(
+            f"llm unavailable or invalid response: {last_error}",
+            retry_count=max_attempts - 1,
+            raw_response_short=raw_response_short,
+        )
 
     def _is_allowed_endpoint(self) -> bool:
         parsed = urlparse(self.base_url)
@@ -207,13 +263,14 @@ class LLMAnalyzer:
 
     def _final_review_prompt(self, result: DetectionResult) -> str:
         signals = dict((result.feature_summary or {}).get("signals", {}))
+        active_signals = sorted(key for key, value in signals.items() if value is True)
         compact = {
-            "sample_id": result.md5[:8],
-            "score": result.score,
+            "id": result.md5[:8],
+            "score": round(float(result.score), 2),
             "risk": result.risk_level,
             "matched_rules": [hit.rule_id for hit in result.matched_rules],
             "behavior_chains": [str(chain.get("title", "")) for chain in result.behavior_chains],
-            "signals": signals,
+            "signals": active_signals,
             "strong_chain_rules": signals.get("strong_chain_rules", []),
             "strong_categories": signals.get("strong_categories", []),
         }
@@ -248,13 +305,23 @@ class LLMAnalyzer:
             "recommendation": "Review detail.jsonl evidence and validate against the original offline sample if needed.",
         }
 
-    def _final_review_skip(self, reason: str) -> dict[str, Any]:
+    def _final_review_skip(
+        self,
+        reason: str,
+        timeout: bool = False,
+        retry_count: int = 0,
+        raw_response_short: str = "",
+    ) -> dict[str, Any]:
         return {
             "mode": "final_review_skipped",
             "reason": reason,
+            "error": reason,
             "verdict": "unchanged",
             "confidence": 0,
             "changed": False,
+            "timeout": timeout,
+            "retry_count": retry_count,
+            "raw_response_short": raw_response_short,
         }
 
     def _cache_key(self, prompt: str) -> str:
