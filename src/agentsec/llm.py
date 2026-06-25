@@ -159,7 +159,12 @@ class LLMAnalyzer:
                     "role": "system",
                     "content": (
                         'Return JSON only: {"verdict":"benign|malicious|unchanged","confidence":0-1,'
-                        '"reason":"short reason"}. Use only the provided JSON. No raw logs.'
+                        '"reason":"short reason"}. Use only the provided JSON. No raw logs. '
+                        "Review confirmed closure, not rule output. matched_rules, behavior_chains, signals, "
+                        "and strong_categories are candidate hints, not proof. Malicious requires confirmed "
+                        "destructive action, explicit malicious action, or same-command/pid-chain credential "
+                        "file access plus real external exfil. If only aggregate persistence/credential/network "
+                        "hints are present without closure, prefer benign."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -264,15 +269,37 @@ class LLMAnalyzer:
     def _final_review_prompt(self, result: DetectionResult) -> str:
         signals = dict((result.feature_summary or {}).get("signals", {}))
         active_signals = sorted(key for key, value in signals.items() if value is True)
+        strong_chain_rules = [str(rule_id) for rule_id in signals.get("strong_chain_rules") or []]
+        same_command_exfil = bool(
+            signals.get("same_command_credential_exfil")
+            or signals.get("confirmed_same_command_real_exfil")
+            or (
+                "R117" in strong_chain_rules
+                and signals.get("real_exfil")
+                and signals.get("credential_file_path")
+                and signals.get("real_command_context")
+            )
+        )
         compact = {
+            "task": "false_positive_final_review",
             "id": result.md5[:8],
-            "score": round(float(result.score), 2),
-            "risk": result.risk_level,
-            "matched_rules": [hit.rule_id for hit in result.matched_rules],
-            "behavior_chains": [str(chain.get("title", "")) for chain in result.behavior_chains],
-            "signals": active_signals,
-            "strong_chain_rules": signals.get("strong_chain_rules", []),
-            "strong_categories": signals.get("strong_categories", []),
+            "decision_standard": [
+                "Rule outputs are candidate hints only, not proof.",
+                "Return malicious only when a confirmed proof closure exists.",
+                "Aggregate persistence/credential/network hints without closure should lean benign.",
+            ],
+            "confirmed_closure": {
+                "destructive_action": bool(signals.get("terminal_rule") or signals.get("destructive")),
+                "explicit_malicious_action": bool(signals.get("explicit_malicious_action")),
+                "same_command_or_pid_chain_credential_exfil": same_command_exfil,
+            },
+            "candidate_hints": {
+                "matched_rules": [hit.rule_id for hit in result.matched_rules],
+                "behavior_chains": [str(chain.get("title", "")) for chain in result.behavior_chains],
+                "signals": active_signals,
+                "strong_chain_rules": strong_chain_rules,
+                "strong_categories": signals.get("strong_categories", []),
+            },
         }
         return json.dumps(compact, ensure_ascii=False, sort_keys=True)
 

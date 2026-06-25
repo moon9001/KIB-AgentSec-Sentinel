@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import requests
 
 from agentsec.chains import build_behavior_chains
@@ -1077,10 +1079,33 @@ def test_final_llm_review_prompt_uses_structured_fields_only() -> None:
     analyzer = LLMAnalyzer({"mode": "off", "cache": False})
 
     prompt = analyzer._final_review_prompt(result)
+    payload = json.loads(prompt)
 
     assert '"id": "abcdef12"' in prompt
-    assert "matched_rules" in prompt
-    assert "behavior_chains" in prompt
-    assert "strong_chain_rules" in prompt
+    assert "score" not in payload
+    assert "risk" not in payload
+    assert payload["confirmed_closure"] == {
+        "destructive_action": False,
+        "explicit_malicious_action": False,
+        "same_command_or_pid_chain_credential_exfil": False,
+    }
+    assert "matched_rules" in payload["candidate_hints"]
+    assert "behavior_chains" in payload["candidate_hints"]
+    assert "strong_chain_rules" in payload["candidate_hints"]
     assert "evidence" not in prompt
     assert "excerpt" not in prompt
+
+
+def test_final_llm_review_prompt_marks_confirmed_exfil_closure() -> None:
+    result = _aggregate_positive_result()
+    result.feature_summary["signals"]["strong_chain_rules"] = ["R117"]
+    result.feature_summary["signals"]["real_exfil"] = True
+    result.feature_summary["signals"]["credential_file_path"] = True
+    result.feature_summary["signals"]["real_command_context"] = True
+    analyzer = LLMAnalyzer({"mode": "off", "cache": False})
+
+    payload = json.loads(analyzer._final_review_prompt(result))
+
+    assert payload["confirmed_closure"]["same_command_or_pid_chain_credential_exfil"] is True
+    assert "score" not in payload
+    assert "risk" not in payload
