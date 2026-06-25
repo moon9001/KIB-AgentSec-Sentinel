@@ -111,6 +111,62 @@ class LLMAnalyzer:
         except Exception as exc:
             return self._mock(result, f"llm unavailable or invalid response: {exc}")
 
+    def review_final(self, result: DetectionResult) -> dict[str, Any]:
+        if self.max_cases > 0 and self.calls_made >= self.max_cases:
+            return self._final_review_skip(f"LLM max_cases={self.max_cases} reached")
+        prompt = self._final_review_prompt(result)
+        cache_key = self._cache_key(f"final-review\n{prompt}")
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            cached = dict(cached)
+            cached["cached"] = True
+            return cached
+        self.calls_made += 1
+        if not self._is_allowed_endpoint():
+            return self._final_review_skip("external LLM endpoint disabled by configuration")
+        try:
+            import requests
+        except ImportError:
+            return self._final_review_skip("requests is not installed")
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an offline false-positive review assistant. Use only the supplied structured "
+                        "rule summary. Do not request or infer raw logs. Return compact JSON only with keys "
+                        "verdict, confidence, reason. verdict must be one of benign, malicious, uncertain."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.0,
+        }
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        try:
+            response = requests.post(
+                f"{self.base_url.rstrip('/')}/chat/completions",
+                headers=headers,
+                json=payload,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            body = response.json()
+            content = body["choices"][0]["message"]["content"]
+            parsed = self._parse_json_content(content)
+            parsed["mode"] = "llm_final_review"
+            parsed["model"] = self.model
+            parsed.setdefault("verdict", "uncertain")
+            parsed.setdefault("confidence", 0)
+            self._cache_put(cache_key, parsed)
+            return parsed
+        except Exception as exc:
+            return self._final_review_skip(f"llm unavailable or invalid response: {exc}")
+
     def _is_allowed_endpoint(self) -> bool:
         parsed = urlparse(self.base_url)
         host = parsed.hostname or ""
@@ -149,6 +205,20 @@ class LLMAnalyzer:
         }
         return json.dumps(compact, ensure_ascii=False, sort_keys=True)
 
+    def _final_review_prompt(self, result: DetectionResult) -> str:
+        signals = dict((result.feature_summary or {}).get("signals", {}))
+        compact = {
+            "sample_id": result.md5[:8],
+            "score": result.score,
+            "risk": result.risk_level,
+            "matched_rules": [hit.rule_id for hit in result.matched_rules],
+            "behavior_chains": [str(chain.get("title", "")) for chain in result.behavior_chains],
+            "signals": signals,
+            "strong_chain_rules": signals.get("strong_chain_rules", []),
+            "strong_categories": signals.get("strong_categories", []),
+        }
+        return json.dumps(compact, ensure_ascii=False, sort_keys=True)
+
     def _parse_json_content(self, content: str) -> dict[str, Any]:
         text = content.strip()
         fenced = re.search(r"```(?:json)?\s*(.*?)```", text, re.S | re.I)
@@ -176,6 +246,15 @@ class LLMAnalyzer:
             "suggested_label": suggested_label,
             "summary": "Rule-only analysis; LLM was not used.",
             "recommendation": "Review detail.jsonl evidence and validate against the original offline sample if needed.",
+        }
+
+    def _final_review_skip(self, reason: str) -> dict[str, Any]:
+        return {
+            "mode": "final_review_skipped",
+            "reason": reason,
+            "verdict": "unchanged",
+            "confidence": 0,
+            "changed": False,
         }
 
     def _cache_key(self, prompt: str) -> str:

@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--profile", choices=["balanced", "recall", "precision"], default=None, help="Detection strategy profile. Overrides config file profile.")
     parser.add_argument("--use-llm", action="store_true", help="Enable optional OpenAI-compatible LLM attribution.")
     parser.add_argument("--llm-mode", choices=["off", "borderline", "all", "explain-only"], default=None, help="LLM selection/fusion mode.")
+    parser.add_argument("--llm-review-final", action="store_true", help="Optionally let a local LLM review selected rule-positive borderline outputs for 1->0 correction.")
     parser.add_argument("--limit", type=int, default=None, help="Process only the first N sorted samples.")
     return parser.parse_args()
 
@@ -40,6 +41,7 @@ def main() -> int:
         profile=args.profile,
         use_llm=args.use_llm,
         llm_mode=args.llm_mode,
+        llm_review_final=args.llm_review_final,
         limit=args.limit,
     )
     print(json.dumps(summary, ensure_ascii=False, indent=2))

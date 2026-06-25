@@ -26,6 +26,7 @@ def run_pipeline(
     profile: str | None = None,
     use_llm: bool = False,
     llm_mode: str | None = None,
+    llm_review_final: bool = False,
     limit: int | None = None,
 ) -> dict[str, Any]:
     config, rules_config = load_config(config_path, profile=profile)
@@ -58,10 +59,12 @@ def run_pipeline(
 
     expected_md5s = [zip_path.stem for zip_path in sample_zips]
     results = ensure_complete_results(expected_md5s, results, config)
+    final_review_llm = LLMAnalyzer(llm_config) if llm_review_final else None
+    final_review_summary = apply_final_llm_review(results, final_review_llm, config) if final_review_llm else {"enabled": False, "reviewed": 0, "changed": 0}
 
     write_result_csv(output, results)
     write_detail_jsonl(detail_output, results)
-    return summarize_run(results, output, detail_output, expected_md5s, config, config_path, runtime_llm_mode)
+    return summarize_run(results, output, detail_output, expected_md5s, config, config_path, runtime_llm_mode, final_review_summary)
 
 
 def process_sample(
@@ -249,6 +252,83 @@ def apply_llm_correction(result: DetectionResult, scoring_config: dict[str, Any]
     result.summary = f"{result.summary}; llm_medium_correction={old_label}->{result.label}"
 
 
+FINAL_REVIEW_AGGREGATE_RULES = {"R001", "R002", "R004", "R007", "R011", "R013", "R112", "R117"}
+FINAL_REVIEW_CONFIRMED_EXFIL_RULES = {"R101", "R105", "R106", "R107", "R108", "R111", "R116", "R117"}
+FINAL_REVIEW_ALLOWED_STRONG_RULES = {"R112", "R117"}
+
+
+def final_llm_review_skip_reason(result: DetectionResult) -> str | None:
+    if result.label != 1:
+        return "rule label is not 1"
+    signals = (result.feature_summary or {}).get("signals", {})
+    if signals.get("terminal_rule") or signals.get("destructive") or signals.get("explicit_malicious_action"):
+        return "explicit malicious or destructive rule"
+    rule_ids = {hit.rule_id for hit in result.matched_rules}
+    strong_chain_rules = {str(rule_id) for rule_id in signals.get("strong_chain_rules") or []}
+    has_confirmed_exfil = bool(
+        strong_chain_rules & FINAL_REVIEW_CONFIRMED_EXFIL_RULES
+        and (signals.get("real_exfil") or signals.get("network_transfer") or signals.get("network_post"))
+    )
+    if has_confirmed_exfil:
+        return "confirmed real exfil strong chain"
+    if not (rule_ids & FINAL_REVIEW_AGGREGATE_RULES):
+        return "not an aggregate-rule review candidate"
+    if strong_chain_rules and not strong_chain_rules <= FINAL_REVIEW_ALLOWED_STRONG_RULES:
+        return "strong chain outside final-review guard"
+    if not (strong_chain_rules or (rule_ids & {"R112", "R013", "R117"})):
+        return "no final-review aggregate chain"
+    return None
+
+
+def apply_final_llm_review(results: list[DetectionResult], llm: Any, config: dict[str, Any]) -> dict[str, Any]:
+    scoring_config = config.get("scoring", {})
+    min_confidence = float(scoring_config.get("llm_final_review_min_confidence", 0.85))
+    reviewed = 0
+    changed = 0
+    skipped = 0
+    for result in results:
+        skip_reason = final_llm_review_skip_reason(result)
+        if skip_reason is not None:
+            skipped += 1
+            continue
+        reviewed += 1
+        review = llm.review_final(result)
+        review["selected"] = True
+        review["change"] = False
+        verdict = str(review.get("verdict", "")).strip().lower()
+        try:
+            confidence = float(review.get("confidence") or 0)
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if review.get("mode") == "llm_final_review" and verdict == "benign" and confidence >= min_confidence:
+            old_label = result.label
+            result.label = 0
+            result.label_before_llm = old_label
+            result.label_after_llm = result.label
+            result.llm_changed_label = True
+            review["change"] = True
+            review["label_correction"] = f"{old_label}->0"
+            result.summary = f"{result.summary}; llm_final_review={old_label}->0"
+            changed += 1
+        else:
+            result.label_after_llm = result.label
+            result.llm_changed_label = bool(result.llm_changed_label)
+            review.setdefault("label_correction", "unchanged")
+        result.llm_analysis = _merge_llm_analysis(result.llm_analysis, review)
+        result.llm_decision = result.llm_analysis
+    return {"enabled": True, "reviewed": reviewed, "changed": changed, "skipped": skipped, "min_confidence": min_confidence}
+
+
+def _merge_llm_analysis(existing: dict[str, Any] | None, final_review: dict[str, Any]) -> dict[str, Any]:
+    if not existing:
+        return {"mode": "final_review", "final_review": final_review}
+    merged = dict(existing)
+    if "final_review" not in merged:
+        merged = {"mode": str(existing.get("mode", "llm")), "attribution": existing}
+    merged["final_review"] = final_review
+    return merged
+
+
 def write_result_csv(path: Path, results: list[DetectionResult]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -271,6 +351,7 @@ def summarize_run(
     config: dict[str, Any] | None = None,
     config_path: str | Path | None = None,
     llm_mode: str = "off",
+    final_review_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     label_counts = Counter(result.label for result in results)
     rule_counts: Counter[str] = Counter()
@@ -294,6 +375,7 @@ def summarize_run(
         "strong_chain_threshold": (config or {}).get("scoring", {}).get("strong_chain_threshold"),
         "profile_behavior": (config or {}).get("rules", {}).get("profile_behavior", {}),
         "llm_mode": llm_mode,
+        "llm_review_final": final_review_summary or {"enabled": False, "reviewed": 0, "changed": 0},
         "output": str(output),
         "detail_output": str(detail_output),
         "top_rules": rule_counts.most_common(20),

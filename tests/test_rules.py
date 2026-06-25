@@ -4,8 +4,8 @@ from agentsec.chains import build_behavior_chains
 from agentsec.config import DEFAULT_RULES
 from agentsec.config import load_config
 from agentsec.llm import LLMAnalyzer
-from agentsec.models import DetectionResult, Event, SampleFeatures
-from agentsec.pipeline import apply_llm_correction
+from agentsec.models import DetectionResult, Event, RuleHit, SampleFeatures
+from agentsec.pipeline import apply_final_llm_review, apply_llm_correction, final_llm_review_skip_reason
 from agentsec.rules import RuleEngine
 from agentsec.scoring import score_hits
 from agentsec.sysmon import parse_sysmon_file
@@ -888,3 +888,108 @@ def test_llm_can_correct_borderline_chain_but_not_high_confidence_chain() -> Non
     assert high_confidence.label == 1
     assert high_confidence.llm_changed_label is False
     assert high_confidence.llm_analysis["label_correction"] == "skipped_strong_rule"
+
+
+class FakeFinalReviewer:
+    def __init__(self, response: dict) -> None:
+        self.response = response
+        self.calls = 0
+
+    def review_final(self, _result: DetectionResult) -> dict:
+        self.calls += 1
+        return dict(self.response)
+
+
+def _aggregate_positive_result(label: int = 1) -> DetectionResult:
+    return DetectionResult(
+        md5="abcdef123456",
+        label=label,
+        score=72,
+        risk_level="high",
+        matched_rules=[
+            RuleHit("R001", "Sensitive file or directory access", "file", "low", 4),
+            RuleHit("R002", "Credential material access", "credential", "medium", 8),
+            RuleHit("R004", "Network upload or exfiltration command", "network", "medium", 6),
+            RuleHit("R011", "Suspicious command interpreter or living-off-the-land tool", "command", "low", 4),
+            RuleHit("R112", "Persistence mechanism created by suspicious command", "combo", "chain", 58),
+        ],
+        behavior_chains=[{"title": "Persistence mechanism created by suspicious command"}],
+        feature_summary={
+            "signals": {
+                "terminal_rule": False,
+                "destructive": False,
+                "explicit_malicious_action": False,
+                "real_exfil": False,
+                "network_transfer": True,
+                "strong_chain_rules": ["R112"],
+                "strong_categories": ["agent", "network", "persistence"],
+            }
+        },
+    )
+
+
+def test_final_llm_review_can_only_downgrade_selected_benign() -> None:
+    result = _aggregate_positive_result()
+    reviewer = FakeFinalReviewer({"mode": "llm_final_review", "verdict": "benign", "confidence": 0.9, "reason": "aggregate-only"})
+
+    summary = apply_final_llm_review([result], reviewer, {"scoring": {}})
+
+    assert reviewer.calls == 1
+    assert summary["changed"] == 1
+    assert result.label == 0
+    assert result.llm_changed_label is True
+    assert result.llm_analysis["final_review"]["change"] is True
+
+
+def test_final_llm_review_keeps_rule_result_when_unavailable_or_uncertain() -> None:
+    result = _aggregate_positive_result()
+    reviewer = FakeFinalReviewer({"mode": "final_review_skipped", "verdict": "benign", "confidence": 1.0, "reason": "offline"})
+
+    summary = apply_final_llm_review([result], reviewer, {"scoring": {}})
+
+    assert reviewer.calls == 1
+    assert summary["changed"] == 0
+    assert result.label == 1
+    assert result.llm_changed_label is False
+    assert result.llm_analysis["final_review"]["change"] is False
+
+
+def test_final_llm_review_never_upgrades_label0() -> None:
+    result = _aggregate_positive_result(label=0)
+    reviewer = FakeFinalReviewer({"mode": "llm_final_review", "verdict": "malicious", "confidence": 1.0})
+
+    summary = apply_final_llm_review([result], reviewer, {"scoring": {}})
+
+    assert reviewer.calls == 0
+    assert summary["reviewed"] == 0
+    assert result.label == 0
+
+
+def test_final_llm_review_skips_confirmed_real_exfil_chain() -> None:
+    result = _aggregate_positive_result()
+    result.matched_rules.append(RuleHit("R117", "Credential file access with real command exfiltration", "combo", "chain", 60))
+    result.feature_summary["signals"]["strong_chain_rules"] = ["R117"]
+    result.feature_summary["signals"]["real_exfil"] = True
+    reviewer = FakeFinalReviewer({"mode": "llm_final_review", "verdict": "benign", "confidence": 1.0})
+
+    reason = final_llm_review_skip_reason(result)
+    summary = apply_final_llm_review([result], reviewer, {"scoring": {}})
+
+    assert reason == "confirmed real exfil strong chain"
+    assert reviewer.calls == 0
+    assert summary["reviewed"] == 0
+    assert result.label == 1
+
+
+def test_final_llm_review_prompt_uses_structured_fields_only() -> None:
+    result = _aggregate_positive_result()
+    analyzer = LLMAnalyzer({"mode": "off", "cache": False})
+
+    prompt = analyzer._final_review_prompt(result)
+
+    assert '"sample_id": "abcdef12"' in prompt
+    assert "matched_rules" in prompt
+    assert "behavior_chains" in prompt
+    assert "strong_chain_rules" in prompt
+    assert "evidence" not in prompt
+    assert "excerpt" not in prompt

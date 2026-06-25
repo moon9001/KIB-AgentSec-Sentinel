@@ -59,6 +59,42 @@ def test_pipeline_on_synthetic_samples(tmp_path: Path) -> None:
     )
 
 
+def test_final_llm_review_flag_preserves_synthetic_without_llm(tmp_path: Path) -> None:
+    sample_dir = tmp_path / "example-s7"
+    output_dir = tmp_path / "output"
+    subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "make_synthetic_sample.py"), "--output", str(sample_dir)],
+        cwd=ROOT,
+        check=True,
+    )
+
+    def run(name: str, *extra: str) -> dict[str, int]:
+        workdir = tmp_path / f"work-{name}"
+        subprocess.run(
+            [
+                sys.executable,
+                str(ROOT / "scripts" / "run_detect.py"),
+                "--input",
+                str(sample_dir),
+                "--output",
+                str(output_dir / f"{name}.csv"),
+                "--detail-output",
+                str(output_dir / f"{name}.jsonl"),
+                "--workdir",
+                str(workdir),
+                "--config",
+                str(ROOT / "configs" / "default.yaml"),
+                *extra,
+            ],
+            cwd=ROOT,
+            check=True,
+        )
+        with (output_dir / f"{name}.csv").open("r", encoding="utf-8", newline="") as handle:
+            return {row["md5"]: int(row["label"]) for row in csv.DictReader(handle)}
+
+    assert run("rule") == run("final_review", "--llm-review-final")
+
+
 def test_evaluation_aligns_single_zip_truth_mismatch(tmp_path: Path) -> None:
     truth_dir = tmp_path / "example-s7"
     truth_dir.mkdir()
