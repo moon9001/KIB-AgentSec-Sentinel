@@ -19,30 +19,21 @@ SESSION_FIELDS = [
     "type",
     "version",
     "id",
-    "session_id",
-    "conversation_id",
-    "message_id",
-    "turn_id",
     "timestamp",
     "cwd",
     "cmd",
     "tool",
     "action",
     "args",
-    "arguments",
-    "input",
     "message",
     "content",
     "role",
     "function_call",
-    "tool_calls",
     "name",
     "params",
     "result",
     "error",
 ]
-
-SESSION_ACTION_KEYS = {"tool", "action", "cmd", "command", "function_call", "tool_call", "tool_calls", "name", "arguments", "args", "params", "input"}
 
 
 @dataclass
@@ -158,107 +149,7 @@ def parse_session_jsonl(md5: str, path: Path) -> tuple[list[Event], list[str]]:
                     fields=fields,
                 )
             )
-            events.extend(session_action_events(md5, record, line_no, timestamp))
     return events, warnings
-
-
-def session_action_events(md5: str, record: dict[str, Any], line_no: int, timestamp: str | None) -> list[Event]:
-    events: list[Event] = []
-    base_ids = {
-        "line": line_no,
-        "session_id": first_present(record, ["session_id", "conversation_id", "id"], ""),
-        "message_id": first_present(record, ["message_id", "turn_id"], ""),
-        "turn_id": first_present(record, ["turn_id", "message_id"], ""),
-    }
-    group_id = "|".join(str(value) for value in [base_ids["session_id"], base_ids["message_id"], line_no] if value not in (None, ""))
-
-    for index, call in enumerate(iter_session_action_objects(record)):
-        flat = flatten_value(call)
-        fields: dict[str, Any] = {
-            **base_ids,
-            "action_index": index,
-            "action_group": group_id,
-            "flattened_keys": sorted(flat.keys())[:80],
-            "flattened_text": " ".join(flat.values())[:1200],
-        }
-        fields.update(session_action_fields(call))
-        event_type = first_present(fields, ["tool", "action", "cmd", "command", "name", "function_call"], "tool_call")
-        text = compact_json({"tool_call": call}, 1200)
-        events.append(
-            Event(
-                md5=md5,
-                source="session",
-                event_type=redact_text(event_type, 80) or "tool_call",
-                timestamp=timestamp,
-                text=text,
-                fields=fields,
-            )
-        )
-    return events
-
-
-def iter_session_action_objects(record: dict[str, Any]) -> list[dict[str, Any]]:
-    actions: list[dict[str, Any]] = []
-
-    def add_action(value: Any) -> None:
-        if isinstance(value, dict):
-            actions.append(value)
-        elif isinstance(value, list):
-            for item in value:
-                if isinstance(item, dict):
-                    actions.append(item)
-
-    for key in ["tool_calls", "tool_call", "function_call", "actions", "commands"]:
-        if key in record:
-            add_action(record.get(key))
-
-    if any(key in record for key in ["tool", "action", "cmd", "command"]) and not any(action is record for action in actions):
-        actions.append(record)
-
-    nested: list[dict[str, Any]] = []
-    for action in actions:
-        for key in ["function", "function_call", "tool", "args", "arguments", "params", "input"]:
-            value = action.get(key)
-            if isinstance(value, dict) and any(candidate in value for candidate in SESSION_ACTION_KEYS):
-                nested.append(value)
-    actions.extend(nested)
-
-    unique: list[dict[str, Any]] = []
-    seen: set[int] = set()
-    for action in actions:
-        marker = id(action)
-        if marker in seen:
-            continue
-        seen.add(marker)
-        unique.append(action)
-    return unique
-
-
-def session_action_fields(action: dict[str, Any]) -> dict[str, Any]:
-    flat = flatten_value(action)
-    fields: dict[str, Any] = {}
-    for key in ["id", "type", "tool", "action", "cmd", "command", "name", "args", "arguments", "params", "input", "function_call"]:
-        if key in action:
-            fields[key] = action[key]
-    if isinstance(action.get("function"), dict):
-        function = action["function"]
-        fields.setdefault("function_call", function.get("name"))
-        fields.setdefault("name", function.get("name"))
-        if "arguments" in function:
-            fields.setdefault("arguments", function.get("arguments"))
-    if isinstance(action.get("function_call"), dict):
-        function_call = action["function_call"]
-        fields.setdefault("function_call", function_call.get("name"))
-        fields.setdefault("name", function_call.get("name"))
-        if "arguments" in function_call:
-            fields.setdefault("arguments", function_call.get("arguments"))
-    if "cmd" not in fields and "command" in fields:
-        fields["cmd"] = fields["command"]
-    if "params" not in fields:
-        params_text = " ".join(value for key, value in flat.items() if any(marker in key.lower() for marker in ["arg", "param", "input", "command", "cmd"]))
-        if params_text:
-            fields["params"] = params_text
-    return fields
 
 
 def parse_audit_log(md5: str, path: Path) -> tuple[list[Event], dict[str, int], list[str]]:

@@ -72,9 +72,7 @@ class RuleEngine:
         credential_exfil_events = (credential_shell_events or strong_credential_events) if strict_credential else (credential_events or credential_shell_events or strong_credential_events)
         sensitive_chain_events = (strong_sensitive_events or credential_exfil_events) if strict_sensitive else (sensitive_events or credential_exfil_events)
 
-        if sensitive_chain_events and compression_events and (network_events or network_post) and (
-            network_post or self._events_share_execution_context([sensitive_chain_events[0], compression_events[0], network_events[0]])
-        ):
+        if sensitive_chain_events and compression_events and (network_events or network_post):
             hits.append(
                 self._combo_hit(
                     "R101",
@@ -86,7 +84,7 @@ class RuleEngine:
                     pcap_features if network_post else None,
                 )
             )
-        if sensitive_chain_events and network_events and self._events_share_execution_context([sensitive_chain_events[0], network_events[0]]):
+        if sensitive_chain_events and network_events:
             hits.append(
                 self._combo_hit(
                     "R106",
@@ -196,6 +194,18 @@ class RuleEngine:
                     [lateral_events[0], credential_exfil_events[0]],
                 )
             )
+        if credential_exfil_events and (copy_events or compression_events or network_events or network_post):
+            hits.append(
+                self._combo_hit(
+                    "R104",
+                    "Credential access with packaging or transfer evidence",
+                    "combo",
+                    "chain",
+                    "combo_credential_exfil",
+                    [credential_exfil_events[0], (copy_events or compression_events or network_events or [None])[0]],
+                    pcap_features if network_post else None,
+                )
+            )
         credential_file_path = bool(
             strong_credential_events
             or credential_shell_events
@@ -205,7 +215,6 @@ class RuleEngine:
             event for event in credential_events if self._has_real_credential_artifact(f"{self._command_text(event)} {event.text.lower()}")
         ]
         strong_file_context = bool(strong_sensitive_events or strong_credential_events or credential_shell_events or credential_file_path)
-        credential_transfer_groups = self._credential_transfer_groups(events, credential_path_events)
         r117_candidate = bool(
             credential_file_path
             and command_context_events
@@ -239,17 +248,6 @@ class RuleEngine:
                     pcap_features if self._is_network_observed(pcap_features) else None,
                 )
             )
-        if credential_transfer_groups:
-            hits.append(
-                self._combo_hit(
-                    "R104",
-                    "Credential access with packaging or transfer evidence",
-                    "combo",
-                    "chain",
-                    "combo_credential_exfil",
-                    credential_transfer_groups[0],
-                )
-            )
         if real_command_credential_exfil:
             hits.append(
                 self._combo_hit(
@@ -261,9 +259,7 @@ class RuleEngine:
                     real_command_credential_exfil_groups[0],
                 )
             )
-        if shell_events and sensitive_chain_events and (network_events or network_post) and (
-            network_post or self._events_share_execution_context([shell_events[0], sensitive_chain_events[0], network_events[0]])
-        ):
+        if shell_events and sensitive_chain_events and (network_events or network_post):
             hits.append(
                 self._combo_hit(
                     "R108",
@@ -287,9 +283,7 @@ class RuleEngine:
                     pcap_features if self._is_network_observed(pcap_features) else None,
                 )
             )
-        if agent_tool_events and (network_events or network_post) and (sensitive_chain_events or credential_exfil_events) and (
-            network_post or self._events_share_execution_context([agent_tool_events[0], (sensitive_chain_events or credential_exfil_events)[0], network_events[0]])
-        ):
+        if agent_tool_events and (network_events or network_post) and (sensitive_chain_events or credential_exfil_events):
             hits.append(
                 self._combo_hit(
                     "R105",
@@ -307,13 +301,11 @@ class RuleEngine:
         strong_chain_rules = set(explicitly_malicious_rules)
         if real_exfil := bool(network_events or network_post):
             strong_chain_rules.update(chain_candidate_rules & {"R101", "R106", "R107", "R108", "R105", "R111"})
-        if credential_transfer_groups:
-            strong_chain_rules.update(chain_candidate_rules & {"R104"})
-        if credential_file_path and command_context_events and compression_events and network_post:
-            strong_chain_rules.update(chain_candidate_rules & {"R116"})
+        if credential_file_path and command_context_events and (network_events or network_post or compression_events or copy_events):
+            strong_chain_rules.update(chain_candidate_rules & {"R104", "R116"})
         if real_command_credential_exfil:
             strong_chain_rules.update(chain_candidate_rules & {"R117"})
-        if credential_shell_events and (credential_transfer_groups or (network_post and compression_events)):
+        if credential_shell_events and (network_events or network_post or compression_events or copy_events):
             strong_chain_rules.update(chain_candidate_rules & {"R109"})
         if privilege_events and (strong_file_context or real_exfil or persistence_chain_events):
             strong_chain_rules.update(chain_candidate_rules & {"R103", "R110"})
@@ -399,14 +391,10 @@ class RuleEngine:
             fields.get("tool"),
             fields.get("action"),
             fields.get("cmd"),
-            fields.get("command"),
             fields.get("name"),
             fields.get("function_call"),
             fields.get("params"),
             fields.get("args"),
-            fields.get("arguments"),
-            fields.get("input"),
-            fields.get("flattened_text"),
             fields.get("comm"),
             fields.get("exe"),
             fields.get("proctitle"),
@@ -476,33 +464,7 @@ class RuleEngine:
         if event.source == "audit" and event.event_type in {"execve", "proctitle", "syscall"}:
             return bool(command_text)
         if event.source == "session":
-            return contains_any(
-                command_text,
-                [
-                    "cmd_run",
-                    "shell",
-                    "bash",
-                    "sh",
-                    "cat",
-                    "grep",
-                    "cp",
-                    "tar",
-                    "zip",
-                    "curl",
-                    "wget",
-                    "scp",
-                    "sftp",
-                    "rsync",
-                    "ftp",
-                    "python",
-                    "requests.post",
-                    "requests.put",
-                    "read_file",
-                    "download",
-                    "upload",
-                    "send",
-                ],
-            )
+            return contains_any(command_text, ["cmd_run", "shell", "bash", "sh", "cat", "grep", "cp", "tar"])
         if event.source == "sysmon":
             return event.event_type in {"1", "process_create", "process creation", "sysmon"} or bool(
                 event.fields.get("command_line") or event.fields.get("image")
@@ -633,29 +595,7 @@ class RuleEngine:
                     credential_event
                     for credential_event in credential_path_events
                     if not self._is_plain_session_text(credential_event)
-                    and self._same_command_or_action_group(credential_event, event)
-                ),
-                None,
-            )
-            if linked_credential_event:
-                groups.append([linked_credential_event, event])
-        return groups
-
-    def _credential_transfer_groups(self, events: list[Event], credential_path_events: list[Event]) -> list[list[Event]]:
-        groups: list[list[Event]] = []
-        for event in events:
-            if not (self._is_network_exfil_event(event) or self._is_copy_action(event) or self._is_archive_action(event)):
-                continue
-            combined = f"{self._command_text(event)} {event.text.lower()}"
-            if self._has_real_credential_artifact(combined):
-                groups.append([event])
-                continue
-            linked_credential_event = next(
-                (
-                    credential_event
-                    for credential_event in credential_path_events
-                    if not self._is_plain_session_text(credential_event)
-                    and self._same_command_or_action_group(credential_event, event)
+                    and self._same_process_or_parent_chain(credential_event, event)
                 ),
                 None,
             )
@@ -732,22 +672,6 @@ class RuleEngine:
         )
         return upload_marker or direct_transfer or ftp_upload or pipe_or_redirect
 
-    def _same_command_or_action_group(self, first: Event, second: Event) -> bool:
-        return self._same_process_or_parent_chain(first, second) or self._same_audit_record(first, second) or self._same_session_action(first, second)
-
-    def _events_share_execution_context(self, events: list[Event]) -> bool:
-        filtered = [event for event in events if event is not None]
-        if len(filtered) < 2:
-            return bool(filtered)
-        pivot = filtered[0]
-        if all(event.source == "audit" for event in filtered):
-            lines = [int(event.fields.get("line")) for event in filtered if str((event.fields or {}).get("line", "")).isdigit()]
-            if len(lines) == len(filtered):
-                return max(lines) - min(lines) <= 3
-            if not any(self._event_process_value(event, ["pid", "ppid", "audit_serial", "serial"]) for event in filtered):
-                return True
-        return all(event is pivot or self._same_command_or_action_group(pivot, event) for event in filtered[1:])
-
     def _same_process_or_parent_chain(self, first: Event, second: Event) -> bool:
         first_pid = self._event_process_value(first, ["pid", "process_id", "processid", "process_id_hex"])
         first_ppid = self._event_process_value(first, ["ppid", "parent_pid", "parent_process_id", "parentprocessid"])
@@ -760,41 +684,6 @@ class RuleEngine:
         if first_ppid and second_pid and first_ppid == second_pid:
             return True
         return False
-
-    def _same_audit_record(self, first: Event, second: Event) -> bool:
-        if first.source != "audit" or second.source != "audit":
-            return False
-        first_serial = self._event_process_value(first, ["audit_serial", "serial"])
-        second_serial = self._event_process_value(second, ["audit_serial", "serial"])
-        return bool(first_serial and second_serial and first_serial == second_serial)
-
-    def _same_session_action(self, first: Event, second: Event) -> bool:
-        if first.source != "session" or second.source != "session":
-            return False
-        first_fields = first.fields or {}
-        second_fields = second.fields or {}
-        first_group = str(first_fields.get("action_group") or "")
-        second_group = str(second_fields.get("action_group") or "")
-        if first_group and second_group and first_group == second_group:
-            return True
-        first_call = str(first_fields.get("id") or first_fields.get("tool_call_id") or "")
-        second_call = str(second_fields.get("id") or second_fields.get("tool_call_id") or "")
-        if first_call and second_call and first_call == second_call:
-            return True
-        first_session = str(first_fields.get("session_id") or "")
-        second_session = str(second_fields.get("session_id") or "")
-        if first_session and second_session and first_session != second_session:
-            return False
-        try:
-            first_line = int(first_fields.get("line") or -1000)
-            second_line = int(second_fields.get("line") or 1000)
-        except (TypeError, ValueError):
-            return False
-        if abs(first_line - second_line) > 2:
-            return False
-        if first_session or second_session:
-            return first_session == second_session and self._is_command_access_context(first) and self._is_command_access_context(second)
-        return self._is_command_access_context(first) and self._is_command_access_context(second)
 
     def _event_process_value(self, event: Event, keys: list[str]) -> str:
         fields = event.fields or {}
